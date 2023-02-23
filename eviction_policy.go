@@ -9,19 +9,20 @@ import (
 //
 // For lru and lfu implementations, threshold represents the memory of cached items at which the policy will start eviction.
 //
-// Note that these are arbitrary values that do not reflect how much memory is actually used by a table, but only the memory used by stored values
+// Note that these are arbitrary values that do not reflect how much memory is actually used by a table, but only the memory used the encoded values stored
 type EvictionPolicy interface {
-	push(key string, item item)
+	push(key string, i item)
 	evict(key string)
 	setEvictFn(onEvict func(key string))
 }
 
 type NoEvictionPolicy struct{}
 
-func (n NoEvictionPolicy) push(key string, item item)          {}
+func (n NoEvictionPolicy) push(key string, i item)             {}
 func (n NoEvictionPolicy) evict(key string)                    {}
 func (n NoEvictionPolicy) setEvictFn(onEvict func(key string)) {}
 
+// see [EvictionPolicy]
 type Lru struct {
 	treshold      int64
 	evictionQueue *list.List
@@ -36,6 +37,7 @@ type lruValue struct {
 	size int64
 }
 
+// see [EvictionPolicy]
 func NewLruPolicy(threshold int64) *Lru {
 	return &Lru{
 		treshold:      threshold,
@@ -49,14 +51,14 @@ func (l *Lru) setEvictFn(onEvict func(key string)) {
 	l.onEvict = onEvict
 }
 
-func (l *Lru) push(key string, item item) {
+func (l *Lru) push(key string, i item) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	ele, ok := l.hashMap[key]
 	if ok {
 		currSize := ele.Value.(*lruValue).size
-		newSize := int64(len(item.Value))
+		newSize := int64(len(i.Value))
 		l.size += newSize - currSize
 
 		ele.Value = &lruValue{
@@ -67,10 +69,10 @@ func (l *Lru) push(key string, item item) {
 	} else {
 		v := &lruValue{
 			key:  key,
-			size: int64(len(item.Value)),
+			size: int64(len(i.Value)),
 		}
 		l.hashMap[key] = l.evictionQueue.PushBack(v)
-		l.size += int64(len(item.Value))
+		l.size += int64(len(i.Value))
 	}
 
 	l.unsafeEvictOldest()
@@ -135,7 +137,7 @@ func (l *Lfu) setEvictFn(onEvict func(key string)) {
 	l.onEvict = onEvict
 }
 
-func (l *Lfu) push(key string, item item) {
+func (l *Lfu) push(key string, i item) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -143,11 +145,11 @@ func (l *Lfu) push(key string, item item) {
 	entry, ok := l.hashMap[key]
 	if ok {
 		prevSize := entry.size
-		entry.size = int64(len(item.Value))
+		entry.size = int64(len(i.Value))
 		l.size += entry.size - prevSize
 	} else {
 		entry = &lfuEntry{
-			size: int64(len(item.Value)),
+			size: int64(len(i.Value)),
 			key:  key,
 		}
 		l.hashMap[key] = entry

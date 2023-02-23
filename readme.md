@@ -40,6 +40,7 @@
 ***disclaimer***: This project is still in it's experimental phase
 
 nitecache is an embedded and distributed cache library for golang that supports:
+- sharding
 - explicit cache eviction
 - ttl
 - lfu/lru eviction policies

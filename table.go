@@ -16,23 +16,27 @@ var (
 	ErrTableKeyNotFound = errors.New("Table key not found")
 )
 
+// type used for registering functions through [TableBuilder.WithFunction]
 type Function[T any] func(v T, args []byte) (T, time.Duration, error)
 
 type Table[T any] struct {
-	name        string
-	store       *store[T]
-	getSF       *singleflight.Group
-	evictSF     *singleflight.Group
-	functions   map[string]Function[T]
-	functionsMu *sync.RWMutex
-	metrics     *Metrics
+	name            string
+	store           *store[T]
+	hotStore        *store[T]
+	hotCacheEnabled bool
+	getSF           *singleflight.Group
+	evictSF         *singleflight.Group
+	functions       map[string]Function[T]
+	functionsMu     *sync.RWMutex
+	metrics         *Metrics
 }
 
 type TableBuilder[T any] struct {
-	name           string
-	evictionPolicy EvictionPolicy
-	functions      map[string]Function[T]
-	getter         Getter[T]
+	name            string
+	evictionPolicy  EvictionPolicy
+	hotCacheEnabled bool
+	functions       map[string]Function[T]
+	getter          Getter[T]
 }
 
 func NewTable[T any](name string) *TableBuilder[T] {
@@ -42,18 +46,27 @@ func NewTable[T any](name string) *TableBuilder[T] {
 	}
 }
 
+// Adds a callback function used for auto cache filling
 func (t *TableBuilder[T]) WithGetter(fn Getter[T]) *TableBuilder[T] {
 	t.getter = fn
 	return t
 }
 
+// see [EvictionPolicy]
 func (t *TableBuilder[T]) WithEvictionPolicy(policy EvictionPolicy) *TableBuilder[T] {
 	t.evictionPolicy = policy
 	return t
 }
 
+// Registers a function that can be called using [Table.Execute]
 func (t *TableBuilder[T]) WithFunction(name string, function Function[T]) *TableBuilder[T] {
 	t.functions[name] = function
+	return t
+}
+
+// If hot cache is enable, a new cache will be populated with values gotten from other peers that can be accessed only through [Table.GetHot].
+func (t *TableBuilder[T]) WithHotCache() *TableBuilder[T] {
+	t.hotCacheEnabled = true
 	return t
 }
 
@@ -63,13 +76,15 @@ func (b *TableBuilder[T]) Build() *Table[T] {
 	}
 
 	t := &Table[T]{
-		name:        b.name,
-		store:       newStore(b.evictionPolicy, b.getter),
-		getSF:       &singleflight.Group{},
-		evictSF:     &singleflight.Group{},
-		functions:   b.functions,
-		functionsMu: &sync.RWMutex{},
-		metrics:     newMetrics(),
+		name:            b.name,
+		store:           newStore(b.evictionPolicy, b.getter),
+		hotStore:        newStore[T](b.evictionPolicy, nil),
+		hotCacheEnabled: b.hotCacheEnabled,
+		getSF:           &singleflight.Group{},
+		evictSF:         &singleflight.Group{},
+		functions:       b.functions,
+		functionsMu:     &sync.RWMutex{},
+		metrics:         newMetrics(),
 	}
 
 	tables[b.name] = t
@@ -106,7 +121,7 @@ func (t Table[T]) Get(ctx context.Context, key string) (T, error) {
 }
 
 func (t Table[T]) Put(ctx context.Context, key string, value T, ttl time.Duration) error {
-	item, err := t.store.newItem(key, value, ttl)
+	i, err := t.store.newItem(key, value, ttl)
 	if err != nil {
 		return err
 	}
@@ -117,9 +132,9 @@ func (t Table[T]) Put(ctx context.Context, key string, value T, ttl time.Duratio
 	}
 
 	if owner.ID == pself.ID {
-		t.putLocally(key, item)
+		t.putLocally(key, i)
 	} else {
-		if err := t.putFromPeer(ctx, key, item, client); err != nil {
+		if err := t.putFromPeer(ctx, i, client); err != nil {
 			return err
 		}
 	}
@@ -143,6 +158,7 @@ func (t Table[T]) Evict(ctx context.Context, key string) error {
 	return nil
 }
 
+// Executes a function previously registered through [TableBuilder.WithFunction] to atomically update the value for a given key
 func (t Table[T]) Execute(ctx context.Context, key, function string, args []byte) (T, error) {
 	owner, client, err := getOwner(key)
 	if err != nil {
@@ -167,6 +183,37 @@ func (t Table[T]) Execute(ctx context.Context, key, function string, args []byte
 	return v, err
 }
 
+// looks up local cache if the current node is the owner, otherwise looks up  hotcache
+func (t Table[T]) GetHot(key string) (T, error) {
+	owner, _, err := getOwner(key)
+	if err != nil {
+		return t.getEmptyValue(), err
+	}
+
+	var i item
+	if owner.ID == pself.ID {
+		i, err = t.getLocally(key)
+	} else {
+		i, err = t.getFromHotCache(key)
+	}
+	if err != nil {
+		return t.getEmptyValue(), err
+	}
+
+	if i.isZero() {
+		return t.getEmptyValue(), ErrTableKeyNotFound
+	}
+
+	v, err := t.store.decode(i)
+	if err != nil {
+		return t.getEmptyValue(), err
+	}
+
+	return v, nil
+}
+
+// Can safely be called from a  goroutine, returns a copy of the current table Metrics.
+// For global cache Metrics, refer to [GetMetrics]
 func (t Table[T]) GetMetrics() Metrics {
 	return t.metrics.getCopy()
 }
@@ -174,21 +221,21 @@ func (t Table[T]) GetMetrics() Metrics {
 func (t Table[T]) getLocally(key string) (item, error) {
 	incGet(t.metrics, metrics)
 	sfRes, err, _ := t.getSF.Do(key, func() (any, error) {
-		item, hit, err := t.store.get(key)
+		i, hit, err := t.store.get(key)
 		if !hit {
 			incMiss(t.metrics, metrics)
 		}
 
-		return item, err
+		return i, err
 	})
 	i := sfRes.(item)
 
 	return i, err
 }
 
-func (t Table[T]) putLocally(key string, value item) {
+func (t Table[T]) putLocally(key string, i item) {
 	incPut(t.metrics, metrics)
-	t.store.put(key, value)
+	t.store.put(key, i)
 }
 
 func (t Table[T]) evictLocally(key string) {
@@ -226,37 +273,56 @@ func (t Table[T]) getFromPeer(ctx context.Context, key string, owner *client) (i
 			return item{}, err
 		}
 
-		return item{
+		i := item{
 			Expire: time.UnixMicro(out.Item.Expire),
 			Value:  out.Item.Value,
 			Key:    out.Item.Key,
-		}, nil
+		}
+
+		if t.hotCacheEnabled {
+			t.hotStore.put(i.Key, i)
+		}
+
+		return i, nil
 	})
 	i := sfRes.(item)
 
 	return i, err
 }
 
-func (t Table[T]) putFromPeer(ctx context.Context, key string, value item, owner *client) error {
-	_, err := owner.Put(ctx, &servicepb.PutRequest{
+func (t Table[T]) putFromPeer(ctx context.Context, i item, owner *client) error {
+	if _, err := owner.Put(ctx, &servicepb.PutRequest{
 		Table: t.name,
 		Value: &servicepb.Item{
-			Expire: value.Expire.UnixMicro(),
-			Value:  value.Value,
-			Key:    key,
+			Expire: i.Expire.UnixMicro(),
+			Value:  i.Value,
+			Key:    i.Key,
 		},
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+
+	if t.hotCacheEnabled {
+		t.hotStore.put(i.Key, i)
+	}
+
+	return nil
 }
 
 func (t Table[T]) evictFromPeer(ctx context.Context, key string, owner *client) error {
 	_, err, _ := t.evictSF.Do(key, func() (any, error) {
-		_, err := owner.Evict(ctx, &servicepb.EvictRequest{
+		if _, err := owner.Evict(ctx, &servicepb.EvictRequest{
 			Table: t.name,
 			Key:   key,
-		})
+		}); err != nil {
+			return nil, err
+		}
 
-		return nil, err
+		if t.hotCacheEnabled {
+			t.hotStore.evict(key)
+		}
+
+		return nil, nil
 	})
 	return err
 }
@@ -272,10 +338,22 @@ func (t Table[T]) executeFromPeer(ctx context.Context, key, function string, arg
 		return item{}, err
 	}
 
-	return item{
+	i := item{
 		Expire: time.UnixMicro(out.Value.Expire),
 		Value:  out.Value.Value,
-	}, nil
+		Key:    key,
+	}
+
+	if t.hotCacheEnabled {
+		t.hotStore.put(key, i)
+	}
+
+	return i, nil
+}
+
+func (t Table[T]) getFromHotCache(key string) (item, error) {
+	i, _, err := t.hotStore.get(key)
+	return i, err
 }
 
 func (t Table[T]) decode(b []byte) (item, error) {
