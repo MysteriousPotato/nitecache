@@ -5,6 +5,9 @@ import (
 	"sync/atomic"
 )
 
+// Metrics are limited to the scope of the owner nodes.
+//
+// For example, if node-1 queries node-2, metrics will be registered on node-2 only.
 type Metrics struct {
 	Miss    int64
 	Get     int64

@@ -27,9 +27,11 @@ type Peer struct {
 }
 
 type CacheOpts struct {
+	//Callback function used to initialize peers and detect changes. If PeerDiscovery is supplied, PeerDiscoveryInterval must also be supplied.
 	PeerDiscovery         func() []Peer
 	PeerDiscoveryInterval time.Duration
-	VirtualNodes          int
+	//Defaults to 64
+	VirtualNodes int
 }
 
 type itable interface {
@@ -49,7 +51,8 @@ var tables map[string]itable
 var metrics *Metrics
 
 // Creates a new nitecache instance
-// vNodes defaults to 64 if it is empty
+//
+// Init should only be called once. Calling it twice will return an error
 func Init(self Peer, opts CacheOpts) error {
 	if isInit {
 		return ErrInitAlreadyCalled
@@ -174,6 +177,8 @@ func getTable(name string) (itable, error) {
 	return t, nil
 }
 
+// Can safely be called from a goroutine, returns a copy of the current cache Metrics.
+// For Metrics specific to a [Table], refer to [Table.GetMetrics]
 func GetMetrics() Metrics {
 	return metrics.getCopy()
 }

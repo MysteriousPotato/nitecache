@@ -7,6 +7,7 @@ import (
 	"github.com/MysteriousPotato/go-lockable"
 )
 
+// Type used for auto cache filling
 type Getter[T any] func(key string) (T, time.Duration, error)
 
 type store[T any] struct {
@@ -61,8 +62,8 @@ func (s store[T]) get(key string) (item, bool, error) {
 		}
 	}()
 
-	item, hit := s.items.Load(key)
-	if s.getter != nil && (!hit || item.isExpired()) {
+	i, hit := s.items.Load(key)
+	if s.getter != nil && (!hit || i.isExpired()) {
 		s.items.RUnlockKey(key)
 		unlocked = true
 
@@ -77,9 +78,9 @@ func (s store[T]) get(key string) (item, bool, error) {
 		return item, false, nil
 	}
 
-	go s.evictionPolicy.push(key, item)
+	s.evictionPolicy.push(key, i)
 
-	return item, hit, nil
+	return i, hit, nil
 }
 
 func (s store[T]) put(key string, i item) {
@@ -88,7 +89,7 @@ func (s store[T]) put(key string, i item) {
 
 	s.items.Store(key, i)
 
-	go s.evictionPolicy.push(key, i)
+	s.evictionPolicy.push(key, i)
 }
 
 func (s store[T]) evict(key string) {
@@ -97,7 +98,7 @@ func (s store[T]) evict(key string) {
 
 	s.items.Delete(key)
 
-	go s.evictionPolicy.evict(key)
+	s.evictionPolicy.evict(key)
 }
 
 func (s store[T]) update(key string, fn func(value T) (T, time.Duration, error)) (item, bool, error) {
@@ -135,7 +136,7 @@ func (s store[T]) update(key string, fn func(value T) (T, time.Duration, error))
 	}
 	s.items.Store(key, newItem)
 
-	go s.evictionPolicy.push(key, i)
+	s.evictionPolicy.push(key, i)
 
 	return newItem, hit, nil
 }
@@ -154,7 +155,7 @@ func (s store[T]) unsafeCacheAside(key string) (item, error) {
 
 	s.items.Store(key, newItem)
 
-	go s.evictionPolicy.push(key, newItem)
+	s.evictionPolicy.push(key, newItem)
 
 	return newItem, nil
 }
