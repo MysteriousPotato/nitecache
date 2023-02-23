@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+option go_package = "./servicepb/servicepb";
+
+package servicepb;
+
+service Service{
+	rpc Get(GetRequest) returns (GetResponse) {}
+	rpc Put(PutRequest) returns (EmptyResponse) {}
+	rpc Evict(EvictRequest) returns (EmptyResponse) {}
+	rpc Execute(ExecuteRequest) returns (ExecuteResponse) {}
+}
+
+message Item{
+	string key = 1;
+	bytes value = 2;
+	int64 expire = 3;
+}
+
+message GetRequest{
+	string table = 1;
+	string key = 2;
+}
+
+message GetResponse{
+	Item item = 1;
+}
+
+message PutRequest{
+	string table = 1;
+	Item value = 2;
+}
+
+message EvictRequest{
+	string table = 1;
+	string key = 2;
+}
+
+message ExecuteRequest{
+	string table = 1;
+	string key = 2;
+	string function = 3;
+	bytes args = 4;
+}
+
+message ExecuteResponse{
+	Item value = 1;
+}
+
+message EmptyResponse{
+}
