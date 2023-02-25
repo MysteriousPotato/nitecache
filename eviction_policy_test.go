@@ -29,6 +29,7 @@ func TestLru(t *testing.T) {
 
 	for _, op := range ops {
 		lru.push(op.key, item{Value: []byte{0}})
+		lru.apply()
 	}
 
 	if !reflect.DeepEqual(got, expected) {
@@ -60,6 +61,7 @@ func TestLfu(t *testing.T) {
 
 	for _, op := range ops {
 		lfu.push(op.key, item{Value: []byte{0}})
+		lfu.apply()
 	}
 
 	if !reflect.DeepEqual(got, expected) {

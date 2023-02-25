@@ -14,6 +14,7 @@ type store[T any] struct {
 	items          lockable.Map[string, item]
 	getter         Getter[T]
 	evictionPolicy EvictionPolicy
+	closeCh        chan bool
 }
 
 type item struct {
@@ -29,8 +30,21 @@ func newStore[T any](evictionPolicy EvictionPolicy, getter Getter[T]) *store[T] 
 		items:          lockable.NewMap[string, item](),
 		evictionPolicy: NoEvictionPolicy{},
 		getter:         getter,
+		closeCh:        make(chan bool),
 	}
 	s.evictionPolicy.setEvictFn(s.items.Delete)
+
+	go func() {
+		ticker := time.NewTicker(time.Second * 2)
+		for range ticker.C {
+			select {
+			case <-s.closeCh:
+				return
+			default:
+				s.evictionPolicy.apply()
+			}
+		}
+	}()
 
 	return &s
 }
@@ -170,6 +184,10 @@ func (s store[T]) decode(i item) (T, error) {
 		return v, err
 	}
 	return v, nil
+}
+
+func (s store[T]) close() {
+	s.closeCh <- true
 }
 
 func (i item) isExpired() bool {

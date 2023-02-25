@@ -13,6 +13,7 @@ import (
 type EvictionPolicy interface {
 	push(key string, i item)
 	evict(key string)
+	apply()
 	setEvictFn(onEvict func(key string))
 }
 
@@ -21,6 +22,7 @@ type NoEvictionPolicy struct{}
 func (n NoEvictionPolicy) push(key string, i item)             {}
 func (n NoEvictionPolicy) evict(key string)                    {}
 func (n NoEvictionPolicy) setEvictFn(onEvict func(key string)) {}
+func (n NoEvictionPolicy) apply()                              {}
 
 // see [EvictionPolicy]
 type Lru struct {
@@ -74,8 +76,6 @@ func (l *Lru) push(key string, i item) {
 		l.hashMap[key] = l.evictionQueue.PushBack(v)
 		l.size += int64(len(i.Value))
 	}
-
-	l.unsafeEvictOldest()
 }
 
 func (l *Lru) evict(key string) {
@@ -90,7 +90,10 @@ func (l *Lru) evict(key string) {
 	}
 }
 
-func (l *Lru) unsafeEvictOldest() {
+func (l *Lru) apply() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	for l.size > l.treshold {
 		ele := l.evictionQueue.Front()
 		value := ele.Value.(*lruValue)
@@ -188,7 +191,6 @@ func (l *Lfu) push(key string, i item) {
 		}
 		l.unsafeRemoveFreqEntry(prevNode, entry)
 	}
-	l.unsafeEvictLeastUsed()
 }
 
 func (l *Lfu) evict(key string) {
@@ -202,8 +204,10 @@ func (l *Lfu) evict(key string) {
 	}
 }
 
-// Not concurrently safe!
-func (l *Lfu) unsafeEvictLeastUsed() {
+func (l *Lfu) apply() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	for l.size > l.treshold {
 		node := l.freqList.Front()
 		nodeValue := node.Value.(*lfuNode)
