@@ -3,6 +3,7 @@ package exemple
 import (
 	"context"
 	"errors"
+	"hash/crc32"
 	"time"
 
 	"github.com/MysteriousPotato/nitecache"
@@ -15,45 +16,60 @@ type Session struct {
 }
 
 func main() {
-	//Both ID and Addr must be unque across peers
-	self := nitecache.Peer{
-		ID:   "1",
-		Addr: "localhost:8100",
+	//Both ID and Addr must be unique across peers
+	selfID := "1"
+	members := []nitecache.Member{
+		{ID: "1", Addr: "node1:8100"},
+		{ID: "2", Addr: "node1:8200"},
 	}
 
-	if err := nitecache.Init(self, nitecache.CacheOpts{
-		VirtualNodes:          25,
-		PeerDiscoveryInterval: time.Second * 5,
-		PeerDiscovery: func() []nitecache.Peer {
-			return getPeersFromSomewhere()
+	c, err := nitecache.NewCache(
+		selfID,
+		members,
+		nitecache.CacheOpts{
+			VirtualNodes: 64,
+			Timeout:      time.Second * 5,
+			HashFunc: func(key string) (int, error) {
+				return int(crc32.ChecksumIEEE([]byte(key))), nil
+			},
 		},
-	}); err != nil {
+	)
+	if err != nil {
 		panic(err)
 	}
+	defer func() {
+		if err := c.TearDown(); err != nil {
+			panic(err)
+		}
+	}()
 
 	//Creates a table called "sessions" containing Session values
 	table := nitecache.NewTable[Session]("session").
 		WithEvictionPolicy(nitecache.NewLruPolicy(256<<20)).
-		WithGetter(func(key string) (Session, time.Duration, error) {
-			//Cache-aside getter
-			sess, err := getSessionFromSomewhere()
-			if err != nil {
-				return Session{}, time.Duration(0), err
-			}
+		WithGetter(
+			func(key string) (Session, time.Duration, error) {
+				//Cache-aside getter
+				sess, err := getSessionFromSomewhere()
+				if err != nil {
+					return Session{}, time.Duration(0), err
+				}
 
-			return sess, time.Hour, nil
-		}).
-		WithFunction("updateUsername", func(s Session, args []byte) (Session, time.Duration, error) {
-			s.Username = string(args)
-			return s, 0, nil
-		}).
-		Build()
+				return sess, time.Hour, nil
+			},
+		).
+		WithFunction(
+			"updateUsername", func(s Session, args []byte) (Session, time.Duration, error) {
+				s.Username = string(args)
+				return s, 0, nil
+			},
+		).
+		Build(c)
 
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*5)
 	defer cancel()
 
 	sess, err := table.Get(ctx, "key")
-	if errors.Is(err, nitecache.ErrTableKeyNotFound) {
+	if errors.Is(err, nitecache.ErrKeyNotFound) {
 		//handle key not found
 	}
 	if err != nil {
@@ -72,13 +88,6 @@ func main() {
 	sess, err = table.Execute(ctx, "key", "updateUsername", []byte("new username"))
 	if err != nil {
 		panic(err)
-	}
-}
-
-func getPeersFromSomewhere() []nitecache.Peer {
-	return []nitecache.Peer{
-		{ID: "1", Addr: "node1:8100"},
-		{ID: "2", Addr: "node1:8200"},
 	}
 }
 

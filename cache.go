@@ -1,175 +1,195 @@
 package nitecache
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sync"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 var (
-	addrReg                         = regexp.MustCompile("^[^:]+:[0-9]{2,5}$")
-	ErrDuplicatePeer                = errors.New("duplicate peer detected")
-	ErrInvalidPeerAddr              = errors.New("invalid peer address")
-	ErrTableNotFound                = errors.New("table not found")
-	ErrMissingSelfInPeers           = errors.New("peers must contain the current node")
-	ErrMissingPeer                  = errors.New("peers must contain at least one member")
-	ErrInitAlreadyCalled            = errors.New("Init already called")
-	ErrMissingPeerDiscoveryInterval = errors.New("missing field PeerDiscoveryInterval in CacheOpts")
-	unableToSetPeersErrStr          = "unable to set peers"
+	addrReg               = regexp.MustCompile("^[^:]+:[0-9]{2,5}$")
+	ErrDuplicatePeer      = errors.New("duplicate peer detected")
+	ErrInvalidPeerAddr    = errors.New("invalid peer address")
+	ErrTableNotFound      = errors.New("table not found")
+	ErrMissingSelfInPeers = errors.New("peers must contain the current node")
+	ErrMissingMembers     = errors.New("peers must contain at least one member")
 )
 
-type Peer struct {
-	ID   string
-	Addr string
+type Cache struct {
+	ring    *hashring
+	selfID  string
+	clients clients
+	mu      *sync.RWMutex
+	tables  map[string]itable
+	metrics *Metrics
+	opts    CacheOpts
+	closeCh chan bool
 }
 
 type CacheOpts struct {
-	//Callback function used to initialize peers and detect changes. If PeerDiscovery is supplied, PeerDiscoveryInterval must also be supplied.
-	PeerDiscovery         func() []Peer
-	PeerDiscoveryInterval time.Duration
-	//Defaults to 64
+	//Defaults to 32
 	VirtualNodes int
+	//Defaults to FNV-1
+	HashFunc HashFunc
+	//Defaults to 2 seconds
+	Timeout time.Duration
+	//opt to skip server start
+	testMode bool
 }
 
 type itable interface {
 	getLocally(key string) (item, error)
-	putLocally(key string, value item)
+	putLocally(itm item)
 	evictLocally(key string)
 	executeLocally(key, function string, args []byte) (item, error)
-	decode(b []byte) (item, error)
+	TearDown()
 }
 
-var isInit bool
-var pself *Peer
-var pclients clients
-var ppicker peerPicker
-var pmu *sync.RWMutex
-var tables map[string]itable
-var metrics *Metrics
-
-// Creates a new nitecache instance
-//
-// Init should only be called once. Calling it twice will return an error
-func Init(self Peer, opts CacheOpts) error {
-	if isInit {
-		return ErrInitAlreadyCalled
-	}
-	isInit = true
-
-	pself = &self
-	if ok := addrReg.MatchString(self.Addr); !ok {
-		return fmt.Errorf("%w: %v", ErrInvalidPeerAddr, self.Addr)
+// NewCache Creates a new [Cache] instance
+// This should only be called once for a same set of peers, so that gRPC connections can be reused
+// Create a new [Table] instead if you need to store different values
+func NewCache(selfID string, peers []Member, opts CacheOpts) (*Cache, error) {
+	c := &Cache{
+		selfID:  selfID,
+		tables:  make(map[string]itable),
+		mu:      &sync.RWMutex{},
+		clients: clients{},
+		metrics: newMetrics(),
+		opts:    opts,
+		closeCh: make(chan bool),
 	}
 
-	tables = make(map[string]itable)
-	pmu = &sync.RWMutex{}
-	pclients = clients{}
-
-	if opts.VirtualNodes == 0 {
-		opts.VirtualNodes = 64
-	}
-	ppicker = newConsistentHasingPeerPicker(&self, opts.VirtualNodes)
-
-	metrics = newMetrics()
-
-	if opts.PeerDiscovery == nil {
-		//Single node
-		peers := []Peer{self}
-		setPeers(peers)
-	} else {
-		//Multi node
-		if opts.PeerDiscoveryInterval == 0 {
-			return ErrMissingPeerDiscoveryInterval
+	var self Member
+	for _, p := range peers {
+		if p.ID == selfID {
+			self = p
+			break
 		}
+	}
+	if self == (Member{}) {
+		return nil, ErrMissingSelfInPeers
+	}
 
+	if !opts.testMode {
+		server, start, err := newServer(self.Addr, c)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create cache server: %w", err)
+		}
 		go func() {
-			//try to set peers right away
-			peers := opts.PeerDiscovery()
-			if err := setPeers(peers); err != nil {
-				panic(fmt.Errorf("%v: %w", unableToSetPeersErrStr, err))
+			if err := start(); err != nil {
+				panic(fmt.Errorf("unable to create cache server: %w", err))
 			}
-
-			ticker := time.NewTicker(opts.PeerDiscoveryInterval)
-
+		}()
+		go func() {
+			ticker := time.NewTicker(time.Second)
 			for range ticker.C {
-				peers := opts.PeerDiscovery()
-				if err := setPeers(peers); err != nil {
-					panic(fmt.Errorf("%v: %w", unableToSetPeersErrStr, err))
+				select {
+				case <-c.closeCh:
+					server.Stop()
 				}
 			}
 		}()
 	}
 
-	go func() {
-		if err := newServer(self.Addr); err != nil {
-			panic(fmt.Errorf("unable to start cache server: %w", err))
-		}
-	}()
-
-	return nil
-}
-
-func setPeers(peers []Peer) error {
-	if len(peers) == 0 {
-		return ErrMissingPeer
+	if err := c.SetPeers(peers); err != nil {
+		return nil, err
 	}
 
+	return c, nil
+}
+
+// GetMetrics Can safely be called from a goroutine, returns a copy of the current cache Metrics.
+// For Metrics specific to a [Table], refer to [Table.GetMetrics]
+func (c *Cache) GetMetrics() Metrics {
+	return c.metrics.getCopy()
+}
+
+func (c *Cache) SetPeers(peers []Member) error {
+	if len(peers) == 0 {
+		return ErrMissingMembers
+	}
+
+	membersAddrMap := map[string]any{}
+	membersIDMap := map[string]any{}
 	var containsSelf bool
-	for i, p := range peers {
+	for _, p := range peers {
 		if ok := addrReg.MatchString(p.Addr); !ok {
 			return fmt.Errorf("%w: %v", ErrInvalidPeerAddr, p.Addr)
 		}
-
-		if pself.ID == p.ID {
+		if _, ok := membersAddrMap[p.Addr]; ok {
+			return fmt.Errorf("%w for Address %v", ErrDuplicatePeer, p.Addr)
+		}
+		if _, ok := membersIDMap[p.ID]; ok {
+			return fmt.Errorf("%w for ID %v", ErrDuplicatePeer, p.ID)
+		}
+		if c.selfID == p.ID {
 			containsSelf = true
 		}
-
-		for n := i + 1; n < i; n++ {
-			if peers[n].Addr == p.Addr {
-				return fmt.Errorf("%w for Address %v", ErrDuplicatePeer, p.Addr)
-			}
-			if peers[n].ID == p.ID {
-				return fmt.Errorf("%w for ID %v", ErrDuplicatePeer, p.ID)
-			}
-		}
+		membersAddrMap[p.Addr] = nil
+		membersIDMap[p.ID] = nil
 	}
 	if !containsSelf {
 		return ErrMissingSelfInPeers
 	}
 
-	pmu.Lock()
-	defer pmu.Unlock()
+	members := make(Members, len(peers))
+	for i, p := range peers {
+		members[i] = p
+	}
 
-	ppicker.set(peers)
-	if err := pclients.set(peers); err != nil {
+	var err error
+	if c.ring == nil {
+		c.ring, err = newRing(
+			ringCfg{
+				Members:      members,
+				VirtualNodes: c.opts.VirtualNodes,
+				HashFunc:     c.opts.HashFunc,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("unable to create hashring: %w", err)
+		}
+	} else {
+		if err := c.ring.setMembers(members); err != nil {
+			return fmt.Errorf("unable to update hashring: %w", err)
+		}
+	}
+
+	if err := c.clients.set(peers, c.opts.Timeout); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func getOwner(key string) (*Peer, *client, error) {
-	pmu.RLock()
-	defer pmu.RUnlock()
-
-	peer := ppicker.get(key)
-	if peer == (&Peer{}) {
-		return nil, nil, fmt.Errorf("unable to find peer for key %v", key)
+// TearDown Call this whenever a cache is not needed anymore.
+//
+// It will properly teardown all [Table]s from [Cache], close all client connections and stop the gRPC server
+func (c *Cache) TearDown() error {
+	var errs []error
+	// Stop server on next tick
+	c.closeCh <- true
+	// Close all client connections
+	for _, c := range c.clients {
+		if err := c.conn.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// Teardown tables
+	for _, t := range c.tables {
+		t.TearDown()
 	}
 
-	client, ok := pclients[peer.ID]
-	if !ok {
-		return nil, nil, fmt.Errorf("unable to find peer client with ID %v", peer.ID)
+	if errs != nil {
+		return errors.Join(errs...)
 	}
-
-	return peer, client, nil
+	return nil
 }
 
-func getTable(name string) (itable, error) {
-	t, ok := tables[name]
+func (c *Cache) getTable(name string) (itable, error) {
+	t, ok := c.tables[name]
 	if !ok {
 		return nil, ErrTableNotFound
 	}
@@ -177,8 +197,10 @@ func getTable(name string) (itable, error) {
 	return t, nil
 }
 
-// Can safely be called from a goroutine, returns a copy of the current cache Metrics.
-// For Metrics specific to a [Table], refer to [Table.GetMetrics]
-func GetMetrics() Metrics {
-	return metrics.getCopy()
+func (c *Cache) getClient(p Member) (client, error) {
+	cl, ok := c.clients[p.ID]
+	if !ok {
+		return client{}, fmt.Errorf("unable to find peer client with ID %v", p.ID)
+	}
+	return cl, nil
 }

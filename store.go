@@ -7,8 +7,13 @@ import (
 	"github.com/MysteriousPotato/go-lockable"
 )
 
-// Type used for auto cache filling
+// Getter Type used for auto cache filling
 type Getter[T any] func(key string) (T, time.Duration, error)
+
+type storeOpts[T any] struct {
+	getter         Getter[T]
+	evictionPolicy EvictionPolicy
+}
 
 type store[T any] struct {
 	items          lockable.Map[string, item]
@@ -17,25 +22,20 @@ type store[T any] struct {
 	closeCh        chan bool
 }
 
-type item struct {
-	Expire time.Time
-	Value  []byte
-	Key    string
-}
-
-// Eviction policy operations are non-blocking and applied only after store manipulations.
-// This may be desirable for lru/noCacheEviction but may cause a key that has just been inserted to be immediatly removed when using lfu
-func newStore[T any](evictionPolicy EvictionPolicy, getter Getter[T]) *store[T] {
+func newStore[T any](opts storeOpts[T]) *store[T] {
+	if opts.evictionPolicy == nil {
+		opts.evictionPolicy = NoEvictionPolicy{}
+	}
 	s := store[T]{
 		items:          lockable.NewMap[string, item](),
-		evictionPolicy: NoEvictionPolicy{},
-		getter:         getter,
+		evictionPolicy: opts.evictionPolicy,
+		getter:         opts.getter,
 		closeCh:        make(chan bool),
 	}
 	s.evictionPolicy.setEvictFn(s.items.Delete)
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 2)
+		ticker := time.NewTicker(time.Second)
 		for range ticker.C {
 			select {
 			case <-s.closeCh:
@@ -76,8 +76,8 @@ func (s store[T]) get(key string) (item, bool, error) {
 		}
 	}()
 
-	i, hit := s.items.Load(key)
-	if s.getter != nil && (!hit || i.isExpired()) {
+	itm, hit := s.items.Load(key)
+	if s.getter != nil && (!hit || itm.isExpired()) {
 		s.items.RUnlockKey(key)
 		unlocked = true
 
@@ -92,18 +92,17 @@ func (s store[T]) get(key string) (item, bool, error) {
 		return item, false, nil
 	}
 
-	s.evictionPolicy.push(key, i)
+	s.evictionPolicy.push(key, itm)
 
-	return i, hit, nil
+	return itm, hit, nil
 }
 
-func (s store[T]) put(key string, i item) {
-	s.items.LockKey(key)
-	defer s.items.UnlockKey(key)
+func (s store[T]) put(itm item) {
+	s.items.LockKey(itm.Key)
+	defer s.items.UnlockKey(itm.Key)
 
-	s.items.Store(key, i)
-
-	s.evictionPolicy.push(key, i)
+	s.items.Store(itm.Key, itm)
+	s.evictionPolicy.push(itm.Key, itm)
 }
 
 func (s store[T]) evict(key string) {
@@ -111,7 +110,6 @@ func (s store[T]) evict(key string) {
 	defer s.items.UnlockKey(key)
 
 	s.items.Delete(key)
-
 	s.evictionPolicy.evict(key)
 }
 
@@ -119,16 +117,16 @@ func (s store[T]) update(key string, fn func(value T) (T, time.Duration, error))
 	s.items.LockKey(key)
 	defer s.items.UnlockKey(key)
 
-	i, hit := s.items.Load(key)
-	if s.getter != nil && (!hit || i.isExpired()) {
+	itm, hit := s.items.Load(key)
+	if s.getter != nil && (!hit || itm.isExpired()) {
 		var err error
-		i, err = s.unsafeCacheAside(key)
+		itm, err = s.unsafeCacheAside(key)
 		if err != nil {
 			return item{}, false, err
 		}
 	}
 
-	v, err := s.decode(i)
+	v, err := s.decode(itm)
 	if err != nil {
 		return item{}, hit, err
 	}
@@ -150,7 +148,7 @@ func (s store[T]) update(key string, fn func(value T) (T, time.Duration, error))
 	}
 	s.items.Store(key, newItem)
 
-	s.evictionPolicy.push(key, i)
+	s.evictionPolicy.push(key, itm)
 
 	return newItem, hit, nil
 }
@@ -174,26 +172,23 @@ func (s store[T]) unsafeCacheAside(key string) (item, error) {
 	return newItem, nil
 }
 
-func (s store[T]) decode(i item) (T, error) {
+func (s store[T]) decode(itm item) (T, error) {
 	var v T
-	if len(i.Value) == 0 {
+	if len(itm.Value) == 0 {
 		return v, nil
 	}
 
-	if err := json.Unmarshal(i.Value, &v); err != nil {
+	if err := json.Unmarshal(itm.Value, &v); err != nil {
 		return v, err
 	}
 	return v, nil
 }
 
+func (s store[T]) getEmptyValue() T {
+	var v T
+	return v
+}
+
 func (s store[T]) close() {
 	s.closeCh <- true
-}
-
-func (i item) isExpired() bool {
-	return !i.Expire.IsZero() && i.Expire.Before(time.Now())
-}
-
-func (i item) isZero() bool {
-	return i.Key == ""
 }
