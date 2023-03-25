@@ -3,27 +3,34 @@ package nitecache
 import (
 	"context"
 	"errors"
+	"github.com/MysteriousPotato/nitecache/test"
 	"reflect"
 	"testing"
 	"time"
 )
 
 func TestMetrics(t *testing.T) {
-	if err := Init(Peer{Addr: "localhost:8100", ID: "1"}, CacheOpts{}); err != nil {
+	c, err := NewCache("1", []Member{{ID: "1", Addr: test.GetUniqueAddr()}}, CacheOpts{})
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer test.TearDown(c)
 
 	tables := []*Table[int]{
 		NewTable[int]("table-1").
-			WithFunction("function", func(v int, args []byte) (int, time.Duration, error) {
-				return v, 0, nil
-			}).
-			Build(),
+			WithFunction(
+				"function", func(v int, args []byte) (int, time.Duration, error) {
+					return v, 0, nil
+				},
+			).
+			Build(c),
 		NewTable[int]("table-2").
-			WithFunction("function", func(v int, args []byte) (int, time.Duration, error) {
-				return v, 0, nil
-			}).
-			Build(),
+			WithFunction(
+				"function", func(v int, args []byte) (int, time.Duration, error) {
+					return v, 0, nil
+				},
+			).
+			Build(c),
 	}
 
 	ops := []struct {
@@ -43,7 +50,7 @@ func TestMetrics(t *testing.T) {
 	for _, table := range tables {
 		for _, op := range ops {
 			if op.op == "get" {
-				if _, err := table.Get(ctx, op.key); err != nil && !errors.Is(err, ErrTableKeyNotFound) {
+				if _, err := table.Get(ctx, op.key); err != nil && !errors.Is(err, ErrKeyNotFound) {
 					t.Fatal(err)
 				}
 			}
@@ -66,7 +73,7 @@ func TestMetrics(t *testing.T) {
 	}
 
 	expectedGlobal := Metrics{
-		Miss:  4,
+		Miss:  2,
 		Get:   4,
 		Put:   2,
 		Evict: 2,
@@ -75,7 +82,7 @@ func TestMetrics(t *testing.T) {
 		},
 	}
 	expectedTable := Metrics{
-		Miss:  2,
+		Miss:  1,
 		Get:   2,
 		Put:   1,
 		Evict: 1,
@@ -86,7 +93,7 @@ func TestMetrics(t *testing.T) {
 
 	gotTable1 := tables[0].GetMetrics()
 	gotTable2 := tables[1].GetMetrics()
-	gotGlobal := GetMetrics()
+	gotGlobal := c.GetMetrics()
 
 	if !reflect.DeepEqual(expectedGlobal, gotGlobal) {
 		t.Fatalf("expected global: %+v\ngot:%+v", expectedGlobal, gotGlobal)

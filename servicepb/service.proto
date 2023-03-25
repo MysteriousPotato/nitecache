@@ -28,7 +28,7 @@ message GetResponse{
 
 message PutRequest{
 	string table = 1;
-	Item value = 2;
+	Item item = 2;
 }
 
 message EvictRequest{
@@ -44,7 +44,7 @@ message ExecuteRequest{
 }
 
 message ExecuteResponse{
-	Item value = 1;
+	Item item = 1;
 }
 
 message EmptyResponse{

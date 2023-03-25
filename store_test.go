@@ -7,9 +7,13 @@ import (
 )
 
 func TestStore(t *testing.T) {
-	s := newStore(NoEvictionPolicy{}, func(key string) (string, time.Duration, error) {
-		return "empty", 0, nil
-	})
+	s := newStore(
+		storeOpts[string]{
+			getter: func(key string) (string, time.Duration, error) {
+				return "empty", 0, nil
+			},
+		},
+	)
 
 	ops := []struct {
 		op  string
@@ -27,7 +31,7 @@ func TestStore(t *testing.T) {
 		{op: "update", key: "2"},
 	}
 	expected := []string{"empty", "1", "empty", "1", "11", "emptyempty"}
-	got := []string{}
+	var got []string
 
 	for _, op := range ops {
 		if op.op == "get" {
@@ -48,15 +52,17 @@ func TestStore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s.put(op.key, item)
+			s.put(item)
 		}
 		if op.op == "evict" {
 			s.evict(op.key)
 		}
 		if op.op == "update" {
-			item, _, err := s.update(op.key, func(value string) (string, time.Duration, error) {
-				return value + value, 0, nil
-			})
+			item, _, err := s.update(
+				op.key, func(value string) (string, time.Duration, error) {
+					return value + value, 0, nil
+				},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}

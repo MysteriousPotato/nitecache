@@ -62,10 +62,12 @@ func incEvict(metrics ...*Metrics) {
 }
 
 func incExecute(function string, metrics ...*Metrics) {
-	for _, m := range metrics {
+	inc := func(m *Metrics) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-
 		m.Execute[function]++
+	}
+	for _, m := range metrics {
+		inc(m)
 	}
 }
