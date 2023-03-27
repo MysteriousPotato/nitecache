@@ -11,6 +11,7 @@ type TableBuilder[T any] struct {
 	hotCacheEnabled bool
 	functions       map[string]Function[T]
 	getter          Getter[T]
+	codec           Codec[T]
 }
 
 func NewTable[T any](name string) *TableBuilder[T] {
@@ -45,6 +46,12 @@ func (tb *TableBuilder[T]) WithHotCache() *TableBuilder[T] {
 	return tb
 }
 
+// WithCodec overrides the default encoding/decoding behavior. Defaults to stdlib [json.Marshal]/[json.Unmarshal]
+func (tb *TableBuilder[T]) WithCodec(codec Codec[T]) *TableBuilder[T] {
+	tb.codec = codec
+	return tb
+}
+
 func (tb *TableBuilder[T]) Build(c *Cache) *Table[T] {
 	if tb.evictionPolicy == nil {
 		tb.evictionPolicy = NoEvictionPolicy{}
@@ -61,12 +68,14 @@ func (tb *TableBuilder[T]) Build(c *Cache) *Table[T] {
 		hotStore: newStore(
 			storeOpts[T]{
 				evictionPolicy: tb.evictionPolicy,
+				codec:          tb.codec,
 			},
 		),
 		store: newStore(
 			storeOpts[T]{
 				evictionPolicy: tb.evictionPolicy,
 				getter:         tb.getter,
+				codec:          tb.codec,
 			},
 		),
 		cache: c,

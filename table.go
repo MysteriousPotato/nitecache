@@ -239,7 +239,7 @@ func (t Table[T]) executeLocally(key, function string, args []byte) (item, error
 		return item{}, err
 	}
 
-	newItem, err := newItem(key, newValue, ttl)
+	newItem, err := t.store.newItem(key, newValue, ttl)
 	if err != nil {
 		return item{}, err
 	}

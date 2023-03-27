@@ -7,11 +7,9 @@ import (
 
 // EvictionPolicy Currently supports lru, lfu and no eviction policy
 //
-// For lru and lfu implementations, threshold represents the memory of cached items at which the policy will start eviction.
-//
-// Note that these are arbitrary values that do not reflect how much memory is actually used by a table, but only the memory used the encoded values stored
+// For lru and lfu implementations, threshold represents the number of items at which the policy will start eviction.
 type EvictionPolicy interface {
-	push(key string, i item)
+	push(key string)
 	evict(key string)
 	apply()
 	setEvictFn(onEvict func(key string))
@@ -19,7 +17,7 @@ type EvictionPolicy interface {
 
 type NoEvictionPolicy struct{}
 
-func (n NoEvictionPolicy) push(_ string, _ item)         {}
+func (n NoEvictionPolicy) push(_ string)                 {}
 func (n NoEvictionPolicy) evict(_ string)                {}
 func (n NoEvictionPolicy) setEvictFn(_ func(key string)) {}
 func (n NoEvictionPolicy) apply()                        {}
@@ -31,11 +29,6 @@ type lru struct {
 	size          int64
 	mu            *sync.Mutex
 	onEvict       func(key string)
-}
-
-type lruValue struct {
-	key  string
-	size int64
 }
 
 // NewLruPolicy see [EvictionPolicy]
@@ -52,28 +45,18 @@ func (l *lru) setEvictFn(onEvict func(key string)) {
 	l.onEvict = onEvict
 }
 
-func (l *lru) push(key string, i item) {
+func (l *lru) push(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	ele, ok := l.hashMap[key]
 	if ok {
-		currSize := ele.Value.(*lruValue).size
-		newSize := int64(len(i.Value))
-		l.size += newSize - currSize
-
-		ele.Value = &lruValue{
-			key:  key,
-			size: newSize,
-		}
+		ele.Value = &key
 		l.evictionQueue.MoveToBack(ele)
 	} else {
-		v := &lruValue{
-			key:  key,
-			size: int64(len(i.Value)),
-		}
+		v := &key
 		l.hashMap[key] = l.evictionQueue.PushBack(v)
-		l.size += int64(len(i.Value))
+		l.size += 1
 	}
 }
 
@@ -83,8 +66,7 @@ func (l *lru) evict(key string) {
 
 	ele, ok := l.hashMap[key]
 	if ok {
-		size := ele.Value.(*lruValue).size
-		l.size -= size
+		l.size -= 1
 		l.evictionQueue.Remove(ele)
 	}
 }
@@ -95,28 +77,27 @@ func (l *lru) apply() {
 
 	for l.size > l.threshold {
 		ele := l.evictionQueue.Front()
-		value := ele.Value.(*lruValue)
+		key := *ele.Value.(*string)
 
-		l.size -= value.size
-		l.onEvict(value.key)
+		l.size -= 1
+		l.onEvict(key)
 		l.evictionQueue.Remove(ele)
-		delete(l.hashMap, value.key)
+		delete(l.hashMap, key)
 	}
 }
 
 // see [EvictionPolicy]
 type lfu struct {
-	threshold int64
+	threshold int
+	size      int
 	freqList  *list.List
 	hashMap   map[string]*lfuEntry
-	size      int64
 	mu        *sync.Mutex
 	onEvict   func(key string)
 }
 
 type lfuEntry struct {
 	key    string
-	size   int64
 	parent *list.Element
 }
 
@@ -126,7 +107,7 @@ type lfuNode struct {
 }
 
 // NewLfuPolicy see [EvictionPolicy]
-func NewLfuPolicy(threshold int64) EvictionPolicy {
+func NewLfuPolicy(threshold int) EvictionPolicy {
 	return &lfu{
 		threshold: threshold,
 		freqList:  list.New(),
@@ -139,23 +120,16 @@ func (l *lfu) setEvictFn(onEvict func(key string)) {
 	l.onEvict = onEvict
 }
 
-func (l *lfu) push(key string, i item) {
+func (l *lfu) push(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	//Upsert the entry and update cache size
 	entry, ok := l.hashMap[key]
-	if ok {
-		prevSize := entry.size
-		entry.size = int64(len(i.Value))
-		l.size += entry.size - prevSize
-	} else {
-		entry = &lfuEntry{
-			size: int64(len(i.Value)),
-			key:  key,
-		}
+	if !ok {
+		entry = &lfuEntry{key: key}
 		l.hashMap[key] = entry
-		l.size += entry.size
+		l.size += 1
 	}
 
 	if entry.parent == nil {
@@ -221,7 +195,7 @@ func (l *lfu) apply() {
 			break
 		}
 
-		l.size -= entry.size
+		l.size -= 1
 		l.onEvict(entry.key)
 		delete(l.hashMap, entry.key)
 		l.unsafeRemoveFreqEntry(node, entry)
