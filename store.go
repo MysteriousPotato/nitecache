@@ -1,7 +1,6 @@
 package nitecache
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/MysteriousPotato/go-lockable"
@@ -13,6 +12,7 @@ type Getter[T any] func(key string) (T, time.Duration, error)
 type storeOpts[T any] struct {
 	getter         Getter[T]
 	evictionPolicy EvictionPolicy
+	codec          Codec[T]
 }
 
 type store[T any] struct {
@@ -20,16 +20,27 @@ type store[T any] struct {
 	getter         Getter[T]
 	evictionPolicy EvictionPolicy
 	closeCh        chan bool
+	codec          Codec[T]
+}
+
+type item struct {
+	Expire time.Time
+	Value  []byte
+	Key    string
 }
 
 func newStore[T any](opts storeOpts[T]) *store[T] {
 	if opts.evictionPolicy == nil {
 		opts.evictionPolicy = NoEvictionPolicy{}
 	}
+	if opts.codec == nil {
+		opts.codec = &jsonCodec[T]{}
+	}
 	s := store[T]{
 		items:          lockable.NewMap[string, item](),
 		evictionPolicy: opts.evictionPolicy,
 		getter:         opts.getter,
+		codec:          opts.codec,
 		closeCh:        make(chan bool),
 	}
 	s.evictionPolicy.setEvictFn(s.items.Delete)
@@ -55,7 +66,7 @@ func (s store[T]) newItem(key string, value T, ttl time.Duration) (item, error) 
 		expire = time.Now().Add(ttl)
 	}
 
-	b, err := json.Marshal(value)
+	b, err := s.codec.Encode(value)
 	if err != nil {
 		return item{}, err
 	}
@@ -92,7 +103,7 @@ func (s store[T]) get(key string) (item, bool, error) {
 		return item, false, nil
 	}
 
-	s.evictionPolicy.push(key, itm)
+	s.evictionPolicy.push(key)
 
 	return itm, hit, nil
 }
@@ -102,7 +113,7 @@ func (s store[T]) put(itm item) {
 	defer s.items.UnlockKey(itm.Key)
 
 	s.items.Store(itm.Key, itm)
-	s.evictionPolicy.push(itm.Key, itm)
+	s.evictionPolicy.push(itm.Key)
 }
 
 func (s store[T]) evict(key string) {
@@ -136,7 +147,7 @@ func (s store[T]) update(key string, fn func(value T) (T, time.Duration, error))
 		return item{}, hit, err
 	}
 
-	b, err := json.Marshal(newVal)
+	b, err := s.codec.Encode(newVal)
 	if err != nil {
 		return item{}, hit, err
 	}
@@ -148,7 +159,7 @@ func (s store[T]) update(key string, fn func(value T) (T, time.Duration, error))
 	}
 	s.items.Store(key, newItem)
 
-	s.evictionPolicy.push(key, itm)
+	s.evictionPolicy.push(key)
 
 	return newItem, hit, nil
 }
@@ -167,7 +178,7 @@ func (s store[T]) unsafeCacheAside(key string) (item, error) {
 
 	s.items.Store(key, newItem)
 
-	s.evictionPolicy.push(key, newItem)
+	s.evictionPolicy.push(key)
 
 	return newItem, nil
 }
@@ -178,7 +189,7 @@ func (s store[T]) decode(itm item) (T, error) {
 		return v, nil
 	}
 
-	if err := json.Unmarshal(itm.Value, &v); err != nil {
+	if err := s.codec.Decode(itm.Value, &v); err != nil {
 		return v, err
 	}
 	return v, nil
@@ -191,4 +202,12 @@ func (s store[T]) getEmptyValue() T {
 
 func (s store[T]) close() {
 	s.closeCh <- true
+}
+
+func (i item) isExpired() bool {
+	return !i.Expire.IsZero() && i.Expire.Before(time.Now())
+}
+
+func (i item) isZero() bool {
+	return i.Key == ""
 }
