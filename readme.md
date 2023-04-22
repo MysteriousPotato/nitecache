@@ -13,7 +13,7 @@
 <!-- TABLE OF CONTENTS -->
 
 # Table of Contents
-- [Getting started](#getting-started">)
+- [Getting started](#getting-started)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
