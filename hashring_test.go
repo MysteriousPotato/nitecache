@@ -25,6 +25,7 @@ func TestRing_NewOK(t *testing.T) {
 	cfg := ringCfg{
 		Members:      mTest,
 		VirtualNodes: 10,
+		HashFunc:     defaultHashFunc,
 	}
 
 	ring, err := newRing(cfg)
@@ -43,6 +44,7 @@ func TestRing_setMembers(t *testing.T) {
 	cfg := ringCfg{
 		Members:      mTest,
 		VirtualNodes: 10,
+		HashFunc:     defaultHashFunc,
 	}
 
 	ring, err := newRing(cfg)

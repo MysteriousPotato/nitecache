@@ -17,24 +17,21 @@ var (
 	ErrMissingMembers     = errors.New("peers must contain at least one member")
 )
 
-type Cache struct {
-	ring    *hashring
-	selfID  string
-	clients clients
-	mu      *sync.RWMutex
-	tables  map[string]itable
-	metrics *Metrics
-	opts    CacheOpts
-	closeCh chan bool
-}
+type CacheOpt func(c *Cache)
 
-type CacheOpts struct {
-	//Defaults to 32
-	VirtualNodes int
+type Cache struct {
+	ring         *hashring
+	selfID       string
+	clients      clients
+	mu           *sync.RWMutex
+	tables       map[string]itable
+	metrics      *Metrics
+	closeCh      chan bool
+	virtualNodes int
 	//Defaults to FNV-1
-	HashFunc HashFunc
+	hashFunc HashFunc
 	//Defaults to 2 seconds
-	Timeout time.Duration
+	timeout time.Duration
 	//opt to skip server start
 	testMode bool
 }
@@ -50,15 +47,20 @@ type itable interface {
 // NewCache Creates a new [Cache] instance
 // This should only be called once for a same set of peers, so that gRPC connections can be reused
 // Create a new [Table] instead if you need to store different values
-func NewCache(selfID string, peers []Member, opts CacheOpts) (*Cache, error) {
+func NewCache(selfID string, peers []Member, opts ...CacheOpt) (*Cache, error) {
 	c := &Cache{
-		selfID:  selfID,
-		tables:  make(map[string]itable),
-		mu:      &sync.RWMutex{},
-		clients: clients{},
-		metrics: newMetrics(),
-		opts:    opts,
-		closeCh: make(chan bool),
+		selfID:       selfID,
+		tables:       make(map[string]itable),
+		mu:           &sync.RWMutex{},
+		clients:      clients{},
+		metrics:      newMetrics(),
+		closeCh:      make(chan bool),
+		virtualNodes: 32,
+		hashFunc:     defaultHashFunc,
+	}
+
+	for _, opt := range opts {
+		opt(c)
 	}
 
 	var self Member
@@ -72,7 +74,7 @@ func NewCache(selfID string, peers []Member, opts CacheOpts) (*Cache, error) {
 		return nil, ErrMissingSelfInPeers
 	}
 
-	if !opts.testMode {
+	if !c.testMode {
 		server, start, err := newServer(self.Addr, c)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create cache server: %w", err)
@@ -98,6 +100,31 @@ func NewCache(selfID string, peers []Member, opts CacheOpts) (*Cache, error) {
 	}
 
 	return c, nil
+}
+
+// VirtualNodeOpt sets the number of points on the hashring per node
+func VirtualNodeOpt(nodes int) func(c *Cache) {
+	return func(c *Cache) {
+		c.virtualNodes = nodes
+	}
+}
+
+// TimeoutOpt sets the timeout for grpc client timeout
+func TimeoutOpt(timeout time.Duration) func(c *Cache) {
+	return func(c *Cache) {
+		c.timeout = timeout
+	}
+}
+
+// HashFuncOpt sets the hash function used to determine hashring keys
+func HashFuncOpt(hashFunc HashFunc) func(c *Cache) {
+	return func(c *Cache) {
+		c.hashFunc = hashFunc
+	}
+}
+
+func testModeOpt(c *Cache) {
+	c.testMode = true
 }
 
 // GetMetrics Can safely be called from a goroutine, returns a copy of the current cache Metrics.
@@ -144,8 +171,8 @@ func (c *Cache) SetPeers(peers []Member) error {
 		c.ring, err = newRing(
 			ringCfg{
 				Members:      members,
-				VirtualNodes: c.opts.VirtualNodes,
-				HashFunc:     c.opts.HashFunc,
+				VirtualNodes: c.virtualNodes,
+				HashFunc:     c.hashFunc,
 			},
 		)
 		if err != nil {
@@ -157,7 +184,7 @@ func (c *Cache) SetPeers(peers []Member) error {
 		}
 	}
 
-	if err := c.clients.set(peers, c.opts.Timeout); err != nil {
+	if err := c.clients.set(peers, c.timeout); err != nil {
 		return err
 	}
 
