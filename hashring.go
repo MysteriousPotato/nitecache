@@ -35,12 +35,6 @@ func newRing(cfg ringCfg) (*hashring, error) {
 		members:      cfg.Members,
 		virtualNodes: cfg.VirtualNodes,
 	}
-	if r.hashFunc == nil {
-		r.hashFunc = defaultHashFunc
-	}
-	if r.virtualNodes <= 0 {
-		r.virtualNodes = 32
-	}
 
 	if err := r.populate(); err != nil {
 		return nil, fmt.Errorf("unable to populate hasring: %w", err)

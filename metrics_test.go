@@ -10,7 +10,7 @@ import (
 )
 
 func TestMetrics(t *testing.T) {
-	c, err := NewCache("1", []Member{{ID: "1", Addr: test.GetUniqueAddr()}}, CacheOpts{})
+	c, err := NewCache("1", []Member{{ID: "1", Addr: test.GetUniqueAddr()}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,7 +13,7 @@ func TestCache_SetPeers(t *testing.T) {
 	c, err := NewCache(
 		"potato",
 		[]Member{{ID: "potato", Addr: test.GetUniqueAddr()}},
-		CacheOpts{testMode: true},
+		testModeOpt,
 	)
 	if err != nil {
 		t.Error(err)
@@ -77,7 +77,7 @@ func TestSingleNodeCacheTable(t *testing.T) {
 		Addr: test.GetUniqueAddr(),
 	}
 
-	c, err := NewCache(self.ID, []Member{self}, CacheOpts{})
+	c, err := NewCache(self.ID, []Member{self})
 	if err != nil {
 		t.Error(err)
 	}
@@ -161,25 +161,27 @@ func TestMultiNodeCacheTable(t *testing.T) {
 	caches := make([]*Cache, len(members))
 	tables := make([]*Table[string], len(members))
 	for i, m := range members {
-		c, err := NewCache(m.ID, members, CacheOpts{})
-		if err != nil {
-			t.Error(err)
-		}
-		defer test.TearDown(c)
+		func() {
+			c, err := NewCache(m.ID, members)
+			if err != nil {
+				t.Error(err)
+			}
+			defer test.TearDown(c)
 
-		caches[i] = c
-		tables[i] = NewTable[string]("test").
-			WithGetter(
-				func(key string) (string, time.Duration, error) {
-					return "empty", time.Hour, nil
-				},
-			).
-			WithFunction(
-				"execute", func(s string, args []byte) (string, time.Duration, error) {
-					return "execute", 0, nil
-				},
-			).
-			Build(c)
+			caches[i] = c
+			tables[i] = NewTable[string]("test").
+				WithGetter(
+					func(key string) (string, time.Duration, error) {
+						return "empty", time.Hour, nil
+					},
+				).
+				WithFunction(
+					"execute", func(s string, args []byte) (string, time.Duration, error) {
+						return "execute", 0, nil
+					},
+				).
+				Build(c)
+		}()
 	}
 
 	ctx := context.Background()
