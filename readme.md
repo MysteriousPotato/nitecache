@@ -2,10 +2,10 @@
 
 <br />
 <div id="readme-top" style="text-align: center">
-  <a href="images/MysteriousPotato/nitecache">
+  <a href="https://github.com/MysteriousPotato/nitecache" style="display: flex; justify-content: center;">
     <img src="images/logo.png" alt="Logo" height="100">
   </a>
-    <h1>nitecache</h1>
+    <h3>nitecache</h3>
     golang cache library
 </div>
 
@@ -42,6 +42,9 @@ nitecache is an embedded and distributed cache library for golang that supports:
 ## Getting started
 
 ### Installation
+
+- requires go version >= 1.20
+
 ```sh
 go get github.com/MysteriousPotato/nitecache
 ```
