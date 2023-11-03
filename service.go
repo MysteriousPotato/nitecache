@@ -116,14 +116,11 @@ func (s service) Put(_ context.Context, r *servicepb.PutRequest) (*servicepb.Emp
 		return nil, err
 	}
 
-	t.putLocally(
-		item{
-			Expire: time.UnixMicro(r.Item.Expire),
-			Value:  r.Item.Value,
-			Key:    r.Item.Key,
-		},
-	)
-	return &servicepb.Empty{}, nil
+	return &servicepb.Empty{}, t.putLocally(item{
+		Expire: time.UnixMicro(r.Item.Expire),
+		Value:  r.Item.Value,
+		Key:    r.Item.Key,
+	})
 }
 
 func (s service) Evict(_ context.Context, r *servicepb.EvictRequest) (*servicepb.Empty, error) {
@@ -132,8 +129,7 @@ func (s service) Evict(_ context.Context, r *servicepb.EvictRequest) (*servicepb
 		return nil, err
 	}
 
-	t.evictLocally(r.Key)
-	return &servicepb.Empty{}, nil
+	return &servicepb.Empty{}, t.evictLocally(r.Key)
 }
 
 func (s service) HealthCheck(_ context.Context, _ *servicepb.Empty) (*servicepb.Empty, error) {
