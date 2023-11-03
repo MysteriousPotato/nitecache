@@ -1,6 +1,8 @@
 package nitecache
 
 import (
+	"context"
+	"github.com/MysteriousPotato/nitecache/inmem"
 	"time"
 
 	"github.com/MysteriousPotato/go-lockable"
@@ -9,55 +11,164 @@ import (
 // Getter Type used for auto cache filling
 type Getter[T any] func(key string) (T, time.Duration, error)
 
-type storeOpts[T any] struct {
-	getter         Getter[T]
-	evictionPolicy EvictionPolicy
-	codec          Codec[T]
+type (
+	storeOpts[T any] struct {
+		getter  Getter[T]
+		storage Storage
+		codec   Codec[T]
+	}
+	store[T any] struct {
+		lock     lockable.Lockable[string]
+		getter   Getter[T]
+		internal Storage
+		codec    Codec[T]
+	}
+	item struct {
+		Expire time.Time
+		Value  []byte
+		Key    string
+	}
+)
+
+type Storage interface {
+	Put(key string, value item, opt ...inmem.Opt) bool
+	Evict(key string) bool
+	Get(key string, opt ...inmem.Opt) (item, bool)
 }
 
-type store[T any] struct {
-	items          lockable.Map[string, item]
-	getter         Getter[T]
-	evictionPolicy EvictionPolicy
-	closeCh        chan bool
-	codec          Codec[T]
+func LFU(threshold int) Storage {
+	return inmem.NewLFU[string, item](threshold)
 }
 
-type item struct {
-	Expire time.Time
-	Value  []byte
-	Key    string
+func LRU(threshold int) Storage {
+	return inmem.NewLRU[string, item](threshold)
 }
 
 func newStore[T any](opts storeOpts[T]) *store[T] {
-	if opts.evictionPolicy == nil {
-		opts.evictionPolicy = NoEvictionPolicy{}
-	}
 	if opts.codec == nil {
-		opts.codec = &jsonCodec[T]{}
+		var v T
+		anyV := any(v)
+		if _, isByteSlice := anyV.([]byte); isByteSlice {
+			opts.codec = any(StringCodec[[]byte]{}).(Codec[T])
+		} else if _, isString := anyV.(string); isString {
+			opts.codec = any(StringCodec[string]{}).(Codec[T])
+		} else {
+			opts.codec = &JsonCodec[T]{}
+		}
 	}
-	s := store[T]{
-		items:          lockable.NewMap[string, item](),
-		evictionPolicy: opts.evictionPolicy,
-		getter:         opts.getter,
-		codec:          opts.codec,
-		closeCh:        make(chan bool),
-	}
-	s.evictionPolicy.setEvictFn(s.items.Delete)
 
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		for range ticker.C {
-			select {
-			case <-s.closeCh:
-				return
-			default:
-				s.evictionPolicy.apply()
-			}
+	var storage Storage
+	if opts.storage == nil {
+		storage = inmem.NewCache[string, item]()
+	} else {
+		storage = opts.storage
+	}
+
+	s := store[T]{
+		lock:     lockable.New[string](),
+		getter:   opts.getter,
+		codec:    opts.codec,
+		internal: storage,
+	}
+
+	return &s
+}
+
+func (s store[T]) get(key string) (item, bool, error) {
+	var unlocked bool
+	s.lock.RLockKey(key)
+	defer func() {
+		if !unlocked {
+			s.lock.RUnlockKey(key)
 		}
 	}()
 
-	return &s
+	itm, hit := s.internal.Get(key)
+	if s.getter != nil && (!hit || itm.isExpired()) {
+		s.lock.RUnlockKey(key)
+		unlocked = true
+
+		s.lock.LockKey(key)
+		defer s.lock.UnlockKey(key)
+
+		itm, err := s.unsafeCacheAside(key)
+		if err != nil {
+			return itm, false, err
+		}
+
+		return itm, false, nil
+	}
+	return itm, hit, nil
+}
+
+func (s store[T]) put(itm item) {
+	s.lock.LockKey(itm.Key)
+	defer s.lock.UnlockKey(itm.Key)
+
+	s.internal.Put(itm.Key, itm)
+}
+
+func (s store[T]) evict(key string) {
+	s.lock.LockKey(key)
+	defer s.lock.UnlockKey(key)
+
+	s.internal.Evict(key)
+}
+
+func (s store[T]) update(
+	ctx context.Context,
+	key string,
+	args []byte,
+	fn func(context.Context, T, []byte) (T, time.Duration, error),
+) (item, error) {
+	s.lock.LockKey(key)
+	defer s.lock.UnlockKey(key)
+
+	oldItem, ok := s.internal.Get(key, inmem.SkipInc(true))
+	var skipInc bool
+	if !ok && s.getter != nil {
+		skipInc = true
+		var err error
+		if oldItem, err = s.unsafeCacheAside(key); err != nil {
+			return item{}, err
+		}
+	}
+
+	v, err := s.decode(oldItem)
+	if err != nil {
+		return item{}, err
+	}
+
+	newValue, ttl, err := fn(ctx, v, args)
+	if err != nil {
+		return item{}, err
+	}
+
+	newItem, err := s.newItem(key, newValue, ttl)
+	if err != nil {
+		return item{}, err
+	}
+
+	s.internal.Put(newItem.Key, newItem, inmem.SkipInc(skipInc))
+
+	return newItem, nil
+}
+
+// Make sure to lock the key before using this
+func (s store[T]) unsafeCacheAside(key string) (item, error) {
+	v, ttl, err := s.getter(key)
+	if err != nil {
+		return item{}, err
+	}
+
+	newItem, err := s.newItem(key, v, ttl)
+	if err != nil {
+		return item{}, err
+	}
+
+	s.internal.Put(key, newItem, inmem.SkipInc(true))
+
+	return newItem, nil
 }
 
 func (s store[T]) newItem(key string, value T, ttl time.Duration) (item, error) {
@@ -78,111 +189,6 @@ func (s store[T]) newItem(key string, value T, ttl time.Duration) (item, error) 
 	}, nil
 }
 
-func (s store[T]) get(key string) (item, bool, error) {
-	var unlocked bool
-	s.items.RLockKey(key)
-	defer func() {
-		if !unlocked {
-			s.items.RUnlockKey(key)
-		}
-	}()
-
-	itm, hit := s.items.Load(key)
-	if s.getter != nil && (!hit || itm.isExpired()) {
-		s.items.RUnlockKey(key)
-		unlocked = true
-
-		s.items.LockKey(key)
-		defer s.items.UnlockKey(key)
-
-		item, err := s.unsafeCacheAside(key)
-		if err != nil {
-			return item, false, err
-		}
-
-		return item, false, nil
-	}
-
-	s.evictionPolicy.push(key)
-
-	return itm, hit, nil
-}
-
-func (s store[T]) put(itm item) {
-	s.items.LockKey(itm.Key)
-	defer s.items.UnlockKey(itm.Key)
-
-	s.items.Store(itm.Key, itm)
-	s.evictionPolicy.push(itm.Key)
-}
-
-func (s store[T]) evict(key string) {
-	s.items.LockKey(key)
-	defer s.items.UnlockKey(key)
-
-	s.items.Delete(key)
-	s.evictionPolicy.evict(key)
-}
-
-func (s store[T]) update(key string, fn func(value T) (T, time.Duration, error)) (item, bool, error) {
-	s.items.LockKey(key)
-	defer s.items.UnlockKey(key)
-
-	itm, hit := s.items.Load(key)
-	if s.getter != nil && (!hit || itm.isExpired()) {
-		var err error
-		itm, err = s.unsafeCacheAside(key)
-		if err != nil {
-			return item{}, false, err
-		}
-	}
-
-	v, err := s.decode(itm)
-	if err != nil {
-		return item{}, hit, err
-	}
-
-	newVal, ttl, err := fn(v)
-	if err != nil {
-		return item{}, hit, err
-	}
-
-	b, err := s.codec.Encode(newVal)
-	if err != nil {
-		return item{}, hit, err
-	}
-
-	newItem := item{
-		Value:  b,
-		Expire: time.Now().Add(ttl),
-		Key:    key,
-	}
-	s.items.Store(key, newItem)
-
-	s.evictionPolicy.push(key)
-
-	return newItem, hit, nil
-}
-
-// Make sure to lock the key before using this
-func (s store[T]) unsafeCacheAside(key string) (item, error) {
-	v, ttl, err := s.getter(key)
-	if err != nil {
-		return item{}, err
-	}
-
-	newItem, err := s.newItem(key, v, ttl)
-	if err != nil {
-		return item{}, err
-	}
-
-	s.items.Store(key, newItem)
-
-	s.evictionPolicy.push(key)
-
-	return newItem, nil
-}
-
 func (s store[T]) decode(itm item) (T, error) {
 	var v T
 	if len(itm.Value) == 0 {
@@ -198,10 +204,6 @@ func (s store[T]) decode(itm item) (T, error) {
 func (s store[T]) getEmptyValue() T {
 	var v T
 	return v
-}
-
-func (s store[T]) close() {
-	s.closeCh <- true
 }
 
 func (i item) isExpired() bool {
