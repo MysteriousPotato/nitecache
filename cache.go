@@ -1,98 +1,111 @@
 package nitecache
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"regexp"
+	"github.com/MysteriousPotato/nitecache/servicepb"
+	"google.golang.org/grpc/credentials/insecure"
 	"sync"
 	"time"
+
+	"github.com/MysteriousPotato/nitecache/hashring"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 var (
-	addrReg               = regexp.MustCompile("^[^:]+:[0-9]{2,5}$")
-	ErrDuplicatePeer      = errors.New("duplicate peer detected")
-	ErrInvalidPeerAddr    = errors.New("invalid peer address")
-	ErrTableNotFound      = errors.New("table not found")
-	ErrMissingSelfInPeers = errors.New("peers must contain the current node")
-	ErrMissingMembers     = errors.New("peers must contain at least one member")
+	ErrDuplicatePeer  = errors.New("duplicate peer detected")
+	ErrTableNotFound  = errors.New("table not found")
+	ErrMissingMembers = errors.New("peers must contain at least one member")
+	ErrCacheDestroyed = errors.New("can't use cache after tear down")
 )
 
-type CacheOpt func(c *Cache)
+type (
+	CacheOpt func(c *Cache)
+	// Cache hold the nitecache instance. The zero value is not read for use.
+	//
+	// Refer to [NewCache] for creating an instance.
+	Cache struct {
+		ring                 *hashring.Ring
+		self                 Member
+		clients              clients
+		clientMu             *sync.Mutex
+		tables               map[string]table
+		tablesMu             *sync.Mutex
+		metrics              *metrics
+		virtualNodes         int
+		hashFunc             hashring.HashFunc
+		timeout              time.Duration
+		members              []Member
+		grpcOpts             []grpc.ServerOption
+		service              server
+		transportCredentials credentials.TransportCredentials
+	}
+)
 
-type Cache struct {
-	ring         *hashring
-	selfID       string
-	clients      clients
-	mu           *sync.RWMutex
-	tables       map[string]itable
-	metrics      *Metrics
-	closeCh      chan bool
-	virtualNodes int
-	//Defaults to FNV-1
-	hashFunc HashFunc
-	//Defaults to 2 seconds
-	timeout time.Duration
-	//opt to skip server start
-	testMode bool
+type Member struct {
+	ID   string
+	Addr string
 }
 
-type itable interface {
+type table interface {
 	getLocally(key string) (item, error)
-	putLocally(itm item)
-	evictLocally(key string)
-	executeLocally(key, function string, args []byte) (item, error)
-	TearDown()
+	putLocally(itm item) error
+	evictLocally(key string) error
+	callLocally(ctx context.Context, key, function string, args []byte) (item, error)
+	tearDown()
 }
 
 // NewCache Creates a new [Cache] instance
-// This should only be called once for a same set of peers, so that gRPC connections can be reused
-// Create a new [Table] instead if you need to store different values
-func NewCache(selfID string, peers []Member, opts ...CacheOpt) (*Cache, error) {
+//
+// This should only be called once for a same set of peers, so that connections can be reused.
+//
+// Create a new [Table] using [NewTable] if you need to store different values.
+//
+// Members must have a unique ID and Addr.
+//
+// Ex.:
+//
+//	func() {
+//			self := nitecache.Member{ID: "1", Addr: "localhost:8000"}
+//			c, err := nitecache.NewCache(self, nitecache.Member{self})
+//			...
+//	}
+func NewCache(self Member, peers []Member, opts ...CacheOpt) (*Cache, error) {
 	c := &Cache{
-		selfID:       selfID,
-		tables:       make(map[string]itable),
-		mu:           &sync.RWMutex{},
-		clients:      clients{},
-		metrics:      newMetrics(),
-		closeCh:      make(chan bool),
-		virtualNodes: 32,
-		hashFunc:     defaultHashFunc,
+		self:                 self,
+		clients:              clients{},
+		clientMu:             &sync.Mutex{},
+		tables:               make(map[string]table),
+		tablesMu:             &sync.Mutex{},
+		metrics:              newMetrics(),
+		virtualNodes:         32,
+		hashFunc:             hashring.DefaultHashFunc,
+		timeout:              time.Second * 3,
+		members:              []Member{},
+		transportCredentials: insecure.NewCredentials(),
 	}
 
 	for _, opt := range opts {
 		opt(c)
 	}
 
-	var self Member
-	for _, p := range peers {
-		if p.ID == selfID {
-			self = p
+	var peersIncludeSelf bool
+	for _, peer := range peers {
+		if peer.ID == self.ID {
+			peersIncludeSelf = true
 			break
 		}
 	}
-	if self == (Member{}) {
-		return nil, ErrMissingSelfInPeers
+	if !peersIncludeSelf {
+		peers = append(peers, self)
 	}
 
-	if !c.testMode {
-		server, start, err := newServer(self.Addr, c)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create cache server: %w", err)
-		}
-		go func() {
-			if err := start(); err != nil {
-				panic(fmt.Errorf("unable to create cache server: %w", err))
-			}
-		}()
-		go func() {
-			ticker := time.NewTicker(time.Second)
-			for range ticker.C {
-				select {
-				case <-c.closeCh:
-					server.Stop()
-				}
-			}
-		}()
+	var err error
+	c.service, err = newService(self.Addr, c)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create cache service: %w", err)
 	}
 
 	if err := c.SetPeers(peers); err != nil {
@@ -102,14 +115,16 @@ func NewCache(selfID string, peers []Member, opts ...CacheOpt) (*Cache, error) {
 	return c, nil
 }
 
-// VirtualNodeOpt sets the number of points on the hashring per node
+// VirtualNodeOpt sets the number of points/node on the hashring
+// Defaults to 32
 func VirtualNodeOpt(nodes int) func(c *Cache) {
 	return func(c *Cache) {
 		c.virtualNodes = nodes
 	}
 }
 
-// TimeoutOpt sets the timeout for grpc client timeout
+// TimeoutOpt sets the timeout for grpc clients
+// Defaults to 3 seconds
 func TimeoutOpt(timeout time.Duration) func(c *Cache) {
 	return func(c *Cache) {
 		c.timeout = timeout
@@ -117,105 +132,143 @@ func TimeoutOpt(timeout time.Duration) func(c *Cache) {
 }
 
 // HashFuncOpt sets the hash function used to determine hashring keys
-func HashFuncOpt(hashFunc HashFunc) func(c *Cache) {
+// Defaults to FNV-1 algorithm
+func HashFuncOpt(hashFunc hashring.HashFunc) func(c *Cache) {
 	return func(c *Cache) {
 		c.hashFunc = hashFunc
 	}
 }
 
-func testModeOpt(c *Cache) {
-	c.testMode = true
+// GRPCTransportCredentials sets the credentials for the gRPC server
+func GRPCTransportCredentials(opts credentials.TransportCredentials) func(c *Cache) {
+	return func(c *Cache) {
+		c.transportCredentials = opts
+	}
 }
 
-// GetMetrics Can safely be called from a goroutine, returns a copy of the current cache Metrics.
-// For Metrics specific to a [Table], refer to [Table.GetMetrics]
-func (c *Cache) GetMetrics() Metrics {
-	return c.metrics.getCopy()
+// GRPCServerOpts sets the options when creating the gRPC service.
+func GRPCServerOpts(opts ...grpc.ServerOption) func(c *Cache) {
+	return func(c *Cache) {
+		c.grpcOpts = opts
+	}
 }
 
+// GetMetrics Returns a copy of the current cache Metrics.
+// For Metrics specific to a [Table], refer to [Table.GetMetrics].
+func (c *Cache) GetMetrics() (Metrics, error) {
+	if c.isZero() {
+		return Metrics{}, ErrCacheDestroyed
+	}
+	return c.metrics.getCopy(), nil
+}
+
+// SetPeers will update the cache members to the new value.
 func (c *Cache) SetPeers(peers []Member) error {
+	if c.isZero() {
+		return ErrCacheDestroyed
+	}
+
 	if len(peers) == 0 {
 		return ErrMissingMembers
 	}
 
-	membersAddrMap := map[string]any{}
-	membersIDMap := map[string]any{}
+	membersAddrMap := map[string]struct{}{}
+	membersIDMap := map[string]struct{}{}
 	var containsSelf bool
 	for _, p := range peers {
-		if ok := addrReg.MatchString(p.Addr); !ok {
-			return fmt.Errorf("%w: %v", ErrInvalidPeerAddr, p.Addr)
-		}
 		if _, ok := membersAddrMap[p.Addr]; ok {
 			return fmt.Errorf("%w for Address %v", ErrDuplicatePeer, p.Addr)
 		}
 		if _, ok := membersIDMap[p.ID]; ok {
 			return fmt.Errorf("%w for ID %v", ErrDuplicatePeer, p.ID)
 		}
-		if c.selfID == p.ID {
+		if c.self.ID == p.ID {
 			containsSelf = true
 		}
-		membersAddrMap[p.Addr] = nil
-		membersIDMap[p.ID] = nil
+		membersAddrMap[p.Addr] = struct{}{}
+		membersIDMap[p.ID] = struct{}{}
 	}
 	if !containsSelf {
-		return ErrMissingSelfInPeers
+		peers = append(peers, c.self)
 	}
 
-	members := make(Members, len(peers))
+	members := make([]string, len(peers))
 	for i, p := range peers {
-		members[i] = p
+		members[i] = p.ID
 	}
 
 	var err error
 	if c.ring == nil {
-		c.ring, err = newRing(
-			ringCfg{
-				Members:      members,
-				VirtualNodes: c.virtualNodes,
-				HashFunc:     c.hashFunc,
-			},
-		)
+		c.ring, err = hashring.New(hashring.Opt{
+			Members:      members,
+			VirtualNodes: c.virtualNodes,
+			HashFunc:     c.hashFunc,
+		})
 		if err != nil {
 			return fmt.Errorf("unable to create hashring: %w", err)
 		}
 	} else {
-		if err := c.ring.setMembers(members); err != nil {
+		if err := c.ring.SetMembers(members); err != nil {
 			return fmt.Errorf("unable to update hashring: %w", err)
 		}
 	}
 
-	if err := c.clients.set(peers, c.timeout); err != nil {
+	if err := c.setClients(peers); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// TearDown Call this whenever a cache is not needed anymore.
+// TearDown properly tears down all [Table] from [Cache], closes all client connections and stops the grpc server.
 //
-// It will properly teardown all [Table]s from [Cache], close all client connections and stop the gRPC server
+// Once called, using it or any of its table references cause [ErrCacheDestroyed] to be returned.
 func (c *Cache) TearDown() error {
+	if c.isZero() {
+		return ErrCacheDestroyed
+	}
+
 	var errs []error
-	// Stop server on next tick
-	c.closeCh <- true
-	// Close all client connections
-	for _, c := range c.clients {
-		if err := c.conn.Close(); err != nil {
+	for _, client := range c.clients {
+		if err := client.conn.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	// Teardown tables
-	for _, t := range c.tables {
-		t.TearDown()
-	}
 
-	if errs != nil {
-		return errors.Join(errs...)
+	c.service.server.GracefulStop()
+
+	for i := range c.tables {
+		c.tables[i].tearDown()
 	}
-	return nil
+	*c = Cache{}
+
+	return errors.Join(errs...)
 }
 
-func (c *Cache) getTable(name string) (itable, error) {
+// ListenAndServe starts the cache grpc server
+func (c *Cache) ListenAndServe() error {
+	if c.isZero() {
+		return ErrCacheDestroyed
+	}
+	return c.service.server.Serve(c.service.listener)
+}
+
+// HealthCheckPeers checks the status of the cache's grpc clients
+func (c *Cache) HealthCheckPeers(ctx context.Context) error {
+	if c.isZero() {
+		return ErrCacheDestroyed
+	}
+
+	var errs []error
+	for _, client := range c.clients {
+		if _, err := client.HealthCheck(ctx, &servicepb.Empty{}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (c *Cache) getTable(name string) (table, error) {
 	t, ok := c.tables[name]
 	if !ok {
 		return nil, ErrTableNotFound
@@ -224,10 +277,51 @@ func (c *Cache) getTable(name string) (itable, error) {
 	return t, nil
 }
 
-func (c *Cache) getClient(p Member) (client, error) {
-	cl, ok := c.clients[p.ID]
+func (c *Cache) getClient(p string) (*client, error) {
+	cl, ok := c.clients[p]
 	if !ok {
-		return client{}, fmt.Errorf("unable to find peer client with ID %v", p.ID)
+		return nil, fmt.Errorf("unable to find peer client with ID %v", p)
 	}
 	return cl, nil
+}
+
+// Cleanup clients that are not present in peers and create new clients for new peers
+func (c *Cache) setClients(peers []Member) error {
+	c.clientMu.Lock()
+	defer c.clientMu.Unlock()
+
+	peersMap := map[string]Member{}
+	for _, p := range peers {
+		peersMap[p.ID] = p
+	}
+
+	var errs []error
+	for id := range c.clients {
+		if _, ok := peersMap[id]; !ok {
+			if err := c.clients[id].conn.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			delete(c.clients, id)
+		}
+	}
+
+	for id, p := range peersMap {
+		if _, ok := c.clients[id]; ok {
+			continue
+		}
+		client, err := newClient(p.Addr, c)
+		if err != nil {
+			return err
+		}
+		c.clients[id] = client
+	}
+
+	if errs != nil {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func (c *Cache) isZero() bool {
+	return c == nil || c.tables == nil
 }

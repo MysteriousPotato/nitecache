@@ -6,9 +6,10 @@ package servicepb;
 
 service Service{
 	rpc Get(GetRequest) returns (GetResponse) {}
-	rpc Put(PutRequest) returns (EmptyResponse) {}
-	rpc Evict(EvictRequest) returns (EmptyResponse) {}
-	rpc Execute(ExecuteRequest) returns (ExecuteResponse) {}
+	rpc Put(PutRequest) returns (Empty) {}
+	rpc Evict(EvictRequest) returns (Empty) {}
+	rpc Call(CallRequest) returns (CallResponse) {}
+	rpc HealthCheck(Empty) returns (Empty) {}
 }
 
 message Item{
@@ -36,16 +37,16 @@ message EvictRequest{
 	string key = 2;
 }
 
-message ExecuteRequest{
+message CallRequest{
 	string table = 1;
 	string key = 2;
-	string function = 3;
+	string procedure = 3;
 	bytes args = 4;
 }
 
-message ExecuteResponse{
+message CallResponse{
 	Item item = 1;
 }
 
-message EmptyResponse{
+message Empty{
 }

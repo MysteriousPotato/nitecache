@@ -2,13 +2,11 @@ package nitecache
 
 import (
 	"context"
-	"errors"
 	"net"
 	"time"
 
 	"github.com/MysteriousPotato/nitecache/servicepb"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type service struct {
@@ -16,51 +14,47 @@ type service struct {
 	cache *Cache
 }
 
-type client struct {
-	conn *grpc.ClientConn
-	servicepb.ServiceClient
-	timeout time.Duration
+type server struct {
+	listener net.Listener
+	server   *grpc.Server
 }
 
-type clients map[string]client
+type (
+	client struct {
+		conn *grpc.ClientConn
+		servicepb.ServiceClient
+	}
+	clients map[string]*client
+)
 
-// We use a service mesh for automatic mTLS, but it would probably be better to support configuration for others who might not...
-func newClient(addr string, timeout time.Duration) (client, error) {
+func newClient(addr string, c *Cache) (*client, error) {
 	conn, err := grpc.Dial(
 		addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithUnaryInterceptor(timeoutInterceptor(timeout)),
+		grpc.WithTransportCredentials(c.transportCredentials),
+		grpc.WithUnaryInterceptor(timeoutInterceptor(c.timeout)),
 	)
 	if err != nil {
-		return client{}, err
+		return nil, err
 	}
+
 	grpcClient := servicepb.NewServiceClient(conn)
 
-	return client{
+	return &client{
 		ServiceClient: grpcClient,
 		conn:          conn,
 	}, nil
 }
 
-func newServer(addr string, cache *Cache) (*grpc.Server, func() error, error) {
-	lis, err := net.Listen("tcp", addr)
+func newService(addr string, cache *Cache) (server, error) {
+	grpcServer := grpc.NewServer(cache.grpcOpts...)
+	servicepb.RegisterServiceServer(grpcServer, &service{cache: cache})
+
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, nil, err
+		return server{}, err
 	}
 
-	var opts []grpc.ServerOption
-	grpcServer := grpc.NewServer(opts...)
-
-	servicepb.RegisterServiceServer(
-		grpcServer, &service{
-			cache: cache,
-		},
-	)
-
-	start := func() error {
-		return grpcServer.Serve(lis)
-	}
-	return grpcServer, start, nil
+	return server{server: grpcServer, listener: listener}, nil
 }
 
 func timeoutInterceptor(timeout time.Duration) func(
@@ -116,86 +110,48 @@ func (s service) Get(_ context.Context, r *servicepb.GetRequest) (*servicepb.Get
 	}, nil
 }
 
-func (s service) Put(_ context.Context, r *servicepb.PutRequest) (*servicepb.EmptyResponse, error) {
+func (s service) Put(_ context.Context, r *servicepb.PutRequest) (*servicepb.Empty, error) {
 	t, err := s.cache.getTable(r.Table)
 	if err != nil {
 		return nil, err
 	}
 
-	t.putLocally(
-		item{
-			Expire: time.UnixMicro(r.Item.Expire),
-			Value:  r.Item.Value,
-			Key:    r.Item.Key,
-		},
-	)
-	return &servicepb.EmptyResponse{}, nil
+	return &servicepb.Empty{}, t.putLocally(item{
+		Expire: time.UnixMicro(r.Item.Expire),
+		Value:  r.Item.Value,
+		Key:    r.Item.Key,
+	})
 }
 
-func (s service) Evict(_ context.Context, r *servicepb.EvictRequest) (*servicepb.EmptyResponse, error) {
+func (s service) Evict(_ context.Context, r *servicepb.EvictRequest) (*servicepb.Empty, error) {
 	t, err := s.cache.getTable(r.Table)
 	if err != nil {
 		return nil, err
 	}
 
-	t.evictLocally(r.Key)
-	return &servicepb.EmptyResponse{}, nil
+	return &servicepb.Empty{}, t.evictLocally(r.Key)
 }
 
-func (s service) Execute(_ context.Context, r *servicepb.ExecuteRequest) (*servicepb.ExecuteResponse, error) {
+func (s service) HealthCheck(_ context.Context, _ *servicepb.Empty) (*servicepb.Empty, error) {
+	return &servicepb.Empty{}, nil
+}
+
+func (s service) Call(ctx context.Context, r *servicepb.CallRequest) (*servicepb.CallResponse, error) {
 	t, err := s.cache.getTable(r.Table)
 	if err != nil {
 		return nil, err
 	}
 
-	item, err := t.executeLocally(r.Key, r.Function, r.Args)
+	item, err := t.callLocally(ctx, r.Key, r.Procedure, r.Args)
 	if err != nil {
 		return nil, err
 	}
 
-	return &servicepb.ExecuteResponse{
+	return &servicepb.CallResponse{
 		Item: &servicepb.Item{
 			Expire: item.Expire.UnixMicro(),
 			Value:  item.Value,
 			Key:    item.Key,
 		},
 	}, nil
-}
-
-// Cleanup clients that are not present in peers and create new clients for new peers
-func (cs clients) set(peers []Member, timeout time.Duration) error {
-	if timeout == 0 {
-		timeout = time.Second * 2
-	}
-
-	peersMap := map[string]Member{}
-	for _, p := range peers {
-		peersMap[p.ID] = p
-	}
-
-	var errs []error
-	for id := range cs {
-		if _, ok := peersMap[id]; !ok {
-			if err := cs[id].conn.Close(); err != nil {
-				errs = append(errs, err)
-			}
-			delete(cs, id)
-		}
-	}
-
-	for id, p := range peersMap {
-		if _, ok := cs[id]; ok {
-			continue
-		}
-		client, err := newClient(p.Addr, timeout)
-		if err != nil {
-			return err
-		}
-		cs[id] = client
-	}
-
-	if errs != nil {
-		return errors.Join(errs...)
-	}
-	return nil
 }
