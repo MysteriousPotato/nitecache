@@ -12,10 +12,9 @@ service Service{
 	rpc HealthCheck(Empty) returns (Empty) {}
 }
 
-message Item{
-	string key = 1;
-	bytes value = 2;
-	int64 expire = 3;
+message Item{;
+	bytes value = 1;
+	int64 expire = 2;
 }
 
 message GetRequest{
@@ -25,11 +24,13 @@ message GetRequest{
 
 message GetResponse{
 	Item item = 1;
+	bool hit = 2;
 }
 
 message PutRequest{
 	string table = 1;
-	Item item = 2;
+	string key = 2;
+	Item item = 3;
 }
 
 message EvictRequest{

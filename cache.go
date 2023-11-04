@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/MysteriousPotato/nitecache/inmem"
 	"github.com/MysteriousPotato/nitecache/servicepb"
 	"google.golang.org/grpc/credentials/insecure"
 	"sync"
@@ -50,10 +51,10 @@ type Member struct {
 }
 
 type table interface {
-	getLocally(key string) (item, error)
-	putLocally(itm item) error
+	getLocally(key string) (inmem.Item[[]byte], bool, error)
+	putLocally(key string, item inmem.Item[[]byte]) error
 	evictLocally(key string) error
-	callLocally(ctx context.Context, key, function string, args []byte) (item, error)
+	callLocally(ctx context.Context, key, procedure string, args []byte) (inmem.Item[[]byte], error)
 	tearDown()
 }
 

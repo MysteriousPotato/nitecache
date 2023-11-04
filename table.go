@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/MysteriousPotato/nitecache/inmem"
 	"time"
 
 	"github.com/MysteriousPotato/nitecache/servicepb"
@@ -20,13 +21,20 @@ type Procedure[T any] func(ctx context.Context, v T, args []byte) (T, time.Durat
 
 type Table[T any] struct {
 	name       string
-	store      *store[T]
-	hotStore   *store[T]
+	store      *inmem.Store[string, []byte]
+	hotStore   *inmem.Store[string, []byte]
+	codec      Codec[T]
 	getSF      *singleflight.Group
 	evictSF    *singleflight.Group
 	procedures map[string]Procedure[T]
 	metrics    *metrics
 	cache      *Cache
+	autofill   bool
+}
+
+type getResponse struct {
+	value inmem.Item[[]byte]
+	hit   bool
 }
 
 func (t *Table[T]) Get(ctx context.Context, key string) (T, error) {
@@ -37,34 +45,35 @@ func (t *Table[T]) Get(ctx context.Context, key string) (T, error) {
 
 	ownerID, err := t.cache.ring.GetOwner(key)
 	if err != nil {
-		return t.store.getEmptyValue(), err
+		return t.getEmptyValue(), err
 	}
 
-	var itm item
+	var item inmem.Item[[]byte]
+	var hit bool
 	if ownerID == t.cache.self.ID {
-		itm, err = t.getLocally(key)
+		item, hit, err = t.getLocally(key)
 	} else {
 		client, err := t.cache.getClient(ownerID)
 		if err != nil {
-			return t.store.getEmptyValue(), err
+			return t.getEmptyValue(), err
 		}
 
-		itm, err = t.getFromPeer(ctx, key, client)
+		item, hit, err = t.getFromPeer(ctx, key, client)
 		if err != nil {
-			return t.store.getEmptyValue(), err
+			return t.getEmptyValue(), err
 		}
 	}
 	if err != nil {
-		return t.store.getEmptyValue(), err
+		return t.getEmptyValue(), err
 	}
 
-	if itm.isZero() {
-		return t.store.getEmptyValue(), ErrKeyNotFound
+	if !hit && !t.autofill {
+		return t.getEmptyValue(), ErrKeyNotFound
 	}
 
-	v, err := t.store.decode(itm)
-	if err != nil {
-		return t.store.getEmptyValue(), err
+	var v T
+	if err := t.codec.Decode(item.Value, &v); err != nil {
+		return t.getEmptyValue(), err
 	}
 
 	return v, nil
@@ -80,13 +89,13 @@ func (t *Table[T]) Put(ctx context.Context, key string, value T, ttl time.Durati
 		return err
 	}
 
-	itm, err := t.store.newItem(key, value, ttl)
+	b, err := t.codec.Encode(value)
 	if err != nil {
 		return err
 	}
 
 	if ownerID == t.cache.self.ID {
-		if err := t.putLocally(itm); err != nil {
+		if err := t.putLocally(key, t.store.NewItem(b, ttl)); err != nil {
 			return err
 		}
 	} else {
@@ -95,7 +104,7 @@ func (t *Table[T]) Put(ctx context.Context, key string, value T, ttl time.Durati
 			return err
 		}
 
-		if err := t.putFromPeer(ctx, itm, client); err != nil {
+		if err := t.putFromPeer(ctx, key, b, ttl, client); err != nil {
 			return err
 		}
 	}
@@ -141,30 +150,34 @@ func (t *Table[T]) Call(ctx context.Context, key, function string, args []byte) 
 
 	ownerID, err := t.cache.ring.GetOwner(key)
 	if err != nil {
-		return t.store.getEmptyValue(), err
+		return t.getEmptyValue(), err
 	}
 
-	var itm item
+	var item inmem.Item[[]byte]
 	if ownerID == t.cache.self.ID {
-		itm, err = t.callLocally(ctx, key, function, args)
+		item, err = t.callLocally(ctx, key, function, args)
+		if err != nil {
+			return t.getEmptyValue(), err
+		}
 	} else {
 		client, err := t.cache.getClient(ownerID)
 		if err != nil {
-			return t.store.getEmptyValue(), err
+			return t.getEmptyValue(), err
 		}
 
-		itm, err = t.callFromPeer(ctx, key, function, args, client)
+		item, err = t.callFromPeer(ctx, key, function, args, client)
 		if err != nil {
-			return t.store.getEmptyValue(), err
+			return t.getEmptyValue(), err
 		}
 	}
-	if err != nil {
-		return t.store.getEmptyValue(), err
+
+	if item.Value == nil {
+		return t.getEmptyValue(), nil
 	}
 
-	v, err := t.store.decode(itm)
-	if err != nil {
-		return t.store.getEmptyValue(), err
+	var v T
+	if err := t.codec.Decode(item.Value, &v); err != nil {
+		return t.getEmptyValue(), err
 	}
 
 	return v, err
@@ -181,29 +194,30 @@ func (t *Table[T]) GetHot(key string) (T, error) {
 
 	ownerID, err := t.cache.ring.GetOwner(key)
 	if err != nil {
-		return t.store.getEmptyValue(), err
+		return t.getEmptyValue(), err
 	}
 
-	var itm item
+	var item inmem.Item[[]byte]
+	var hit bool
 	if ownerID == t.cache.self.ID {
-		itm, _, err = t.store.get(key)
+		item, hit, err = t.store.Get(key)
 		if err != nil {
-			return t.store.getEmptyValue(), err
+			return t.getEmptyValue(), err
 		}
 	} else {
-		itm, err = t.getFromHotCache(key)
+		item, hit, err = t.getFromHotCache(key)
 	}
 	if err != nil {
-		return t.store.getEmptyValue(), err
+		return t.getEmptyValue(), err
 	}
 
-	if itm.isZero() {
-		return t.store.getEmptyValue(), ErrKeyNotFound
+	if !hit {
+		return t.getEmptyValue(), ErrKeyNotFound
 	}
 
-	v, err := t.store.decode(itm)
-	if err != nil {
-		return t.store.getEmptyValue(), err
+	var v T
+	if err := t.codec.Decode(item.Value, &v); err != nil {
+		return t.getEmptyValue(), err
 	}
 
 	return v, nil
@@ -217,86 +231,114 @@ func (t *Table[T]) GetMetrics() (Metrics, error) {
 	return t.metrics.getCopy(), nil
 }
 
-func (t *Table[T]) getLocally(key string) (item, error) {
+func (t *Table[T]) getLocally(key string) (inmem.Item[[]byte], bool, error) {
 	incGet(t.metrics, t.cache.metrics)
 	sfRes, err, _ := t.getSF.Do(key, func() (any, error) {
-		i, hit, err := t.store.get(key)
+		item, hit, err := t.store.Get(key)
 		if !hit {
 			incMiss(t.metrics, t.cache.metrics)
 		}
-		return i, err
+		return getResponse{
+			value: item,
+			hit:   hit,
+		}, err
 	})
+	res := sfRes.(getResponse)
 
-	return sfRes.(item), err
+	return res.value, res.hit, err
 }
 
-func (t *Table[T]) putLocally(itm item) error {
+func (t *Table[T]) putLocally(key string, item inmem.Item[[]byte]) error {
 	incPut(t.metrics, t.cache.metrics)
-	t.store.put(itm)
+	t.store.Put(key, item)
 	return nil
 }
 
 func (t *Table[T]) evictLocally(key string) error {
 	incEvict(t.metrics, t.cache.metrics)
 	_, _, _ = t.evictSF.Do(key, func() (any, error) {
-		t.store.evict(key)
+		t.store.Evict(key)
 		return nil, nil
 	})
 	return nil
 }
 
-func (t *Table[T]) callLocally(ctx context.Context, key, procedure string, args []byte) (item, error) {
+func (t *Table[T]) callLocally(ctx context.Context, key, procedure string, args []byte) (inmem.Item[[]byte], error) {
 	incCalls(procedure, t.metrics, t.cache.metrics)
 
 	// Can be access concurrently since no write is possible at this point
 	fn, ok := t.procedures[procedure]
 	if !ok {
-		return item{}, ErrRPCNotFound
+		return inmem.Item[[]byte]{}, ErrRPCNotFound
 	}
 
-	return t.store.update(ctx, key, args, fn)
+	return t.store.Update(ctx, key, args, func(ctx context.Context, value []byte, args []byte) ([]byte, time.Duration, error) {
+		var v T
+		if value != nil {
+			if err := t.codec.Decode(value, &v); err != nil {
+				return nil, 0, err
+			}
+		}
+
+		newValue, ttl, err := fn(ctx, v, args)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		b, err := t.codec.Encode(newValue)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		return b, ttl, nil
+	})
 }
 
-func (t *Table[T]) getFromPeer(ctx context.Context, key string, owner *client) (item, error) {
+func (t *Table[T]) getFromPeer(ctx context.Context, key string, owner *client) (inmem.Item[[]byte], bool, error) {
 	sfRes, err, _ := t.getSF.Do(key, func() (any, error) {
 		res, err := owner.Get(ctx, &servicepb.GetRequest{
 			Table: t.name,
 			Key:   key,
 		})
 		if err != nil {
-			return item{}, err
+			return getResponse{}, err
 		}
 
-		itm := item{
+		item := inmem.Item[[]byte]{
 			Expire: time.UnixMicro(res.Item.Expire),
 			Value:  res.Item.Value,
-			Key:    key,
 		}
 
 		if t.hotStore != nil {
-			t.hotStore.put(itm)
+			t.hotStore.Put(key, item)
 		}
 
-		return itm, nil
+		return getResponse{
+			value: item,
+			hit:   res.Hit,
+		}, nil
 	})
+	res := sfRes.(getResponse)
 
-	return sfRes.(item), err
+	return res.value, res.hit, err
 }
 
-func (t *Table[T]) putFromPeer(ctx context.Context, itm item, owner *client) error {
+func (t *Table[T]) putFromPeer(ctx context.Context, key string, b []byte, ttl time.Duration, owner *client) error {
+	item := t.store.NewItem(b, ttl)
+
 	if _, err := owner.Put(ctx, &servicepb.PutRequest{
 		Table: t.name,
+		Key:   key,
 		Item: &servicepb.Item{
-			Expire: itm.Expire.UnixMicro(),
-			Value:  itm.Value,
-			Key:    itm.Key,
+			Expire: item.Expire.UnixMicro(),
+			Value:  item.Value,
 		},
 	}); err != nil {
 		return err
 	}
 
 	if t.hotStore != nil {
-		t.hotStore.put(itm)
+		t.hotStore.Put(key, item)
 	}
 
 	return nil
@@ -312,7 +354,7 @@ func (t *Table[T]) evictFromPeer(ctx context.Context, key string, owner *client)
 		}
 
 		if t.hotStore != nil {
-			t.hotStore.evict(key)
+			t.hotStore.Evict(key)
 		}
 
 		return nil, nil
@@ -325,7 +367,7 @@ func (t *Table[T]) callFromPeer(
 	key, procedure string,
 	args []byte,
 	owner *client,
-) (item, error) {
+) (inmem.Item[[]byte], error) {
 	res, err := owner.Call(ctx, &servicepb.CallRequest{
 		Table:     t.name,
 		Key:       key,
@@ -333,28 +375,26 @@ func (t *Table[T]) callFromPeer(
 		Args:      args,
 	})
 	if err != nil {
-		return item{}, err
+		return inmem.Item[[]byte]{}, err
 	}
 
-	itm := item{
+	item := inmem.Item[[]byte]{
 		Expire: time.UnixMicro(res.Item.Expire),
 		Value:  res.Item.Value,
-		Key:    key,
 	}
 
 	if t.hotStore != nil {
-		t.hotStore.put(itm)
+		t.hotStore.Put(key, item)
 	}
 
-	return itm, nil
+	return item, nil
 }
 
-func (t *Table[T]) getFromHotCache(key string) (item, error) {
+func (t *Table[T]) getFromHotCache(key string) (inmem.Item[[]byte], bool, error) {
 	if t.hotStore == nil {
-		return item{}, fmt.Errorf("hot cache not enabled")
+		return inmem.Item[[]byte]{}, false, fmt.Errorf("hot cache not enabled")
 	}
-	itm, _, _ := t.hotStore.get(key)
-	return itm, nil
+	return t.hotStore.Get(key)
 }
 
 func (t *Table[T]) tearDown() {
@@ -365,4 +405,9 @@ func (t *Table[T]) tearDown() {
 
 func (t *Table[T]) isZero() bool {
 	return t == nil || t.cache == nil
+}
+
+func (t *Table[T]) getEmptyValue() T {
+	var v T
+	return v
 }
