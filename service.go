@@ -2,6 +2,7 @@ package nitecache
 
 import (
 	"context"
+	"github.com/MysteriousPotato/nitecache/inmem"
 	"net"
 	"time"
 
@@ -96,16 +97,16 @@ func (s service) Get(_ context.Context, r *servicepb.GetRequest) (*servicepb.Get
 		return nil, err
 	}
 
-	item, err := t.getLocally(r.Key)
+	item, hit, err := t.getLocally(r.Key)
 	if err != nil {
 		return nil, err
 	}
 
 	return &servicepb.GetResponse{
+		Hit: hit,
 		Item: &servicepb.Item{
 			Expire: item.Expire.UnixMicro(),
 			Value:  item.Value,
-			Key:    item.Key,
 		},
 	}, nil
 }
@@ -116,10 +117,9 @@ func (s service) Put(_ context.Context, r *servicepb.PutRequest) (*servicepb.Emp
 		return nil, err
 	}
 
-	return &servicepb.Empty{}, t.putLocally(item{
+	return &servicepb.Empty{}, t.putLocally(r.Key, inmem.Item[[]byte]{
 		Expire: time.UnixMicro(r.Item.Expire),
 		Value:  r.Item.Value,
-		Key:    r.Item.Key,
 	})
 }
 
@@ -130,10 +130,6 @@ func (s service) Evict(_ context.Context, r *servicepb.EvictRequest) (*servicepb
 	}
 
 	return &servicepb.Empty{}, t.evictLocally(r.Key)
-}
-
-func (s service) HealthCheck(_ context.Context, _ *servicepb.Empty) (*servicepb.Empty, error) {
-	return &servicepb.Empty{}, nil
 }
 
 func (s service) Call(ctx context.Context, r *servicepb.CallRequest) (*servicepb.CallResponse, error) {
@@ -151,7 +147,10 @@ func (s service) Call(ctx context.Context, r *servicepb.CallRequest) (*servicepb
 		Item: &servicepb.Item{
 			Expire: item.Expire.UnixMicro(),
 			Value:  item.Value,
-			Key:    item.Key,
 		},
 	}, nil
+}
+
+func (s service) HealthCheck(_ context.Context, _ *servicepb.Empty) (*servicepb.Empty, error) {
+	return &servicepb.Empty{}, nil
 }

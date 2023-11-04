@@ -25,18 +25,14 @@ func TestMetrics(t *testing.T) {
 
 	tables := []*nitecache.Table[int]{
 		nitecache.NewTable[int]("table-1").
-			WithProcedure(
-				"function", func(_ context.Context, v int, args []byte) (int, time.Duration, error) {
-					return v, 0, nil
-				},
-			).
+			WithProcedure("function", func(_ context.Context, v int, args []byte) (int, time.Duration, error) {
+				return v, 0, nil
+			}).
 			Build(c),
 		nitecache.NewTable[int]("table-2").
-			WithProcedure(
-				"function", func(_ context.Context, v int, args []byte) (int, time.Duration, error) {
-					return v, 0, nil
-				},
-			).
+			WithProcedure("function", func(_ context.Context, v int, args []byte) (int, time.Duration, error) {
+				return v, 0, nil
+			}).
 			Build(c),
 	}
 
