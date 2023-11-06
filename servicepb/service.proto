@@ -8,6 +8,7 @@ service Service{
 	rpc Get(GetRequest) returns (GetResponse) {}
 	rpc Put(PutRequest) returns (Empty) {}
 	rpc Evict(EvictRequest) returns (Empty) {}
+	rpc EvictAll(EvictAllRequest) returns (Empty) {}
 	rpc Call(CallRequest) returns (CallResponse) {}
 	rpc HealthCheck(Empty) returns (Empty) {}
 }
@@ -36,6 +37,11 @@ message PutRequest{
 message EvictRequest{
 	string table = 1;
 	string key = 2;
+}
+
+message EvictAllRequest{
+	string table = 1;
+	repeated string keys = 2;
 }
 
 message CallRequest{

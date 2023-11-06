@@ -65,9 +65,9 @@ func incPut(ms ...*metrics) {
 	}
 }
 
-func incEvict(ms ...*metrics) {
+func incEvict(delta int64, ms ...*metrics) {
 	for _, m := range ms {
-		m.Evict.Add(1)
+		m.Evict.Add(delta)
 	}
 }
 

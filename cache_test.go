@@ -201,6 +201,7 @@ func TestMultiNodeCacheTable(t *testing.T) {
 	tests := []struct {
 		op    string
 		key   string
+		keys  []string
 		value string
 	}{
 		{op: "get", key: "1"},
@@ -217,8 +218,7 @@ func TestMultiNodeCacheTable(t *testing.T) {
 		{op: "evict", key: "2"},
 		{op: "get", key: "2"},
 		{op: "put", key: "2", value: "2"},
-		{op: "evict", key: "1"},
-		{op: "evict", key: "2"},
+		{op: "evictAll", keys: []string{"1", "2"}},
 	}
 
 	for _, table := range tables {
@@ -233,24 +233,24 @@ func TestMultiNodeCacheTable(t *testing.T) {
 					t.Fatal(err)
 				}
 				got = append(got, v)
-				break
 			case "put":
 				if err := table.Put(ctx, tt.key, tt.value, time.Hour); err != nil {
 					t.Fatal(err)
 				}
-				break
 			case "evict":
 				if err := table.Evict(ctx, tt.key); err != nil {
 					t.Fatal(err)
 				}
-				break
+			case "evictAll":
+				if err := table.EvictAll(ctx, tt.keys); err != nil {
+					t.Fatal(err)
+				}
 			case "call":
 				v, err := table.Call(ctx, tt.key, "procedure", []byte{})
 				if err != nil {
 					t.Fatal(err)
 				}
 				got = append(got, v)
-				break
 			}
 		}
 		if !reflect.DeepEqual(got, expected) {

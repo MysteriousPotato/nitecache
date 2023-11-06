@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/MysteriousPotato/nitecache/inmem"
+	"strings"
 	"time"
 
 	"github.com/MysteriousPotato/nitecache/servicepb"
@@ -18,6 +19,14 @@ var (
 
 // Procedure defines the type used for registering RPCs through [TableBuilder.WithProcedure].
 type Procedure[T any] func(ctx context.Context, v T, args []byte) (T, time.Duration, error)
+
+type (
+	BatchEvictionErrs []batchEvictionErr
+	batchEvictionErr  struct {
+		keys []string
+		err  error
+	}
+)
 
 type Table[T any] struct {
 	name       string
@@ -51,7 +60,7 @@ func (t *Table[T]) Get(ctx context.Context, key string) (T, error) {
 	var item inmem.Item[[]byte]
 	var hit bool
 	if ownerID == t.cache.self.ID {
-		item, hit, err = t.getLocally(key)
+		item, hit, err = t.getLocally(ctx, key)
 	} else {
 		client, err := t.cache.getClient(ownerID)
 		if err != nil {
@@ -135,6 +144,74 @@ func (t *Table[T]) Evict(ctx context.Context, key string) error {
 		if err := t.evictFromPeer(ctx, key, client); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// EvictAll attempts to remove all entries from the Table for the given keys.
+//
+// Keys owned by the same client are batched together for efficiency.
+//
+// After the operation, a BatchEvictionErrs detailing which keys (if any) failed to be evicted can be retrieved when checking the returned error.
+// Example:
+//
+//	if errs, ok := err.(nitecache.BatchEvictionErrs); ok {
+//		// Note that keys that AffectedKeys may return keys that were actually evicted successfully.
+//		keysThatFailed := errs.AffectedKeys()
+//	}
+func (t *Table[T]) EvictAll(ctx context.Context, keys []string) error {
+	if t.isZero() {
+		return ErrCacheDestroyed
+	}
+
+	type clientKeys struct {
+		client *client
+		keys   []string
+	}
+
+	var selfKeys []string
+	clientKeysMap := map[string]*clientKeys{}
+	for _, key := range keys {
+		ownerID, err := t.cache.ring.GetOwner(key)
+		if err != nil {
+			return err
+		}
+
+		if ownerID == t.cache.self.ID {
+			selfKeys = append(selfKeys, key)
+			continue
+		}
+
+		if _, ok := clientKeysMap[ownerID]; !ok {
+			c, err := t.cache.getClient(ownerID)
+			if err != nil {
+				return err
+			}
+
+			clientKeysMap[ownerID] = &clientKeys{
+				client: c,
+				keys:   []string{key},
+			}
+			continue
+		}
+
+		clientKeysMap[ownerID].keys = append(clientKeysMap[ownerID].keys, key)
+	}
+
+	t.evictAllLocally(selfKeys)
+
+	var errs BatchEvictionErrs
+	for _, c := range clientKeysMap {
+		if err := t.evictAllFromPeer(ctx, c.keys, c.client); err != nil {
+			errs = append(errs, batchEvictionErr{
+				keys: c.keys,
+				err:  err,
+			})
+		}
+	}
+
+	if errs != nil {
+		return errs
 	}
 	return nil
 }
@@ -231,10 +308,10 @@ func (t *Table[T]) GetMetrics() (Metrics, error) {
 	return t.metrics.getCopy(), nil
 }
 
-func (t *Table[T]) getLocally(key string) (inmem.Item[[]byte], bool, error) {
+func (t *Table[T]) getLocally(ctx context.Context, key string) (inmem.Item[[]byte], bool, error) {
 	incGet(t.metrics, t.cache.metrics)
 	sfRes, err, _ := t.getSF.Do(key, func() (any, error) {
-		item, hit, err := t.store.Get(key)
+		item, hit, err := t.store.Get(ctx, key)
 		if !hit {
 			incMiss(t.metrics, t.cache.metrics)
 		}
@@ -255,12 +332,17 @@ func (t *Table[T]) putLocally(key string, item inmem.Item[[]byte]) error {
 }
 
 func (t *Table[T]) evictLocally(key string) error {
-	incEvict(t.metrics, t.cache.metrics)
+	incEvict(1, t.metrics, t.cache.metrics)
 	_, _, _ = t.evictSF.Do(key, func() (any, error) {
 		t.store.Evict(key)
 		return nil, nil
 	})
 	return nil
+}
+
+func (t *Table[T]) evictAllLocally(keys []string) {
+	incEvict(int64(len(keys)), t.metrics, t.cache.metrics)
+	t.store.EvictAll(keys)
 }
 
 func (t *Table[T]) callLocally(ctx context.Context, key, procedure string, args []byte) (inmem.Item[[]byte], error) {
@@ -362,6 +444,20 @@ func (t *Table[T]) evictFromPeer(ctx context.Context, key string, owner *client)
 	return err
 }
 
+func (t *Table[T]) evictAllFromPeer(ctx context.Context, keys []string, owner *client) error {
+	if _, err := owner.EvictAll(ctx, &servicepb.EvictAllRequest{
+		Table: t.name,
+		Keys:  keys,
+	}); err != nil {
+		return err
+	}
+
+	if t.hotStore != nil {
+		t.hotStore.EvictAll(keys)
+	}
+	return nil
+}
+
 func (t *Table[T]) callFromPeer(
 	ctx context.Context,
 	key, procedure string,
@@ -394,7 +490,7 @@ func (t *Table[T]) getFromHotCache(key string) (inmem.Item[[]byte], bool, error)
 	if t.hotStore == nil {
 		return inmem.Item[[]byte]{}, false, fmt.Errorf("hot cache not enabled")
 	}
-	return t.hotStore.Get(key)
+	return t.hotStore.Get(context.Background(), key)
 }
 
 func (t *Table[T]) tearDown() {
@@ -410,4 +506,23 @@ func (t *Table[T]) isZero() bool {
 func (t *Table[T]) getEmptyValue() T {
 	var v T
 	return v
+}
+
+func (b BatchEvictionErrs) Error() string {
+	var errs []string
+	for _, err := range b {
+		errs = append(errs, fmt.Sprintf("failed to evict keys %v: %v", err.keys, err.err))
+	}
+	return strings.Join(errs, ",")
+}
+
+// AffectedKeys returns a list of  keys owned by clients who returned an error.
+//
+// As a result, the list may contain keys that were successfully evicted.
+func (b BatchEvictionErrs) AffectedKeys() []string {
+	var keys []string
+	for _, err := range b {
+		keys = append(keys, err.keys...)
+	}
+	return keys
 }

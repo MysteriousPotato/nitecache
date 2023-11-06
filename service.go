@@ -132,6 +132,17 @@ func (s service) Evict(_ context.Context, r *servicepb.EvictRequest) (*servicepb
 	return &servicepb.Empty{}, t.evictLocally(r.Key)
 }
 
+func (s service) EvictAll(_ context.Context, r *servicepb.EvictAllRequest) (*servicepb.Empty, error) {
+	t, err := s.cache.getTable(r.Table)
+	if err != nil {
+		return nil, err
+	}
+
+	t.evictAllLocally(r.Keys)
+
+	return &servicepb.Empty{}, nil
+}
+
 func (s service) Call(ctx context.Context, r *servicepb.CallRequest) (*servicepb.CallResponse, error) {
 	t, err := s.cache.getTable(r.Table)
 	if err != nil {

@@ -22,6 +22,7 @@ const (
 	Service_Get_FullMethodName         = "/servicepb.Service/Get"
 	Service_Put_FullMethodName         = "/servicepb.Service/Put"
 	Service_Evict_FullMethodName       = "/servicepb.Service/Evict"
+	Service_EvictAll_FullMethodName    = "/servicepb.Service/EvictAll"
 	Service_Call_FullMethodName        = "/servicepb.Service/Call"
 	Service_HealthCheck_FullMethodName = "/servicepb.Service/HealthCheck"
 )
@@ -33,6 +34,7 @@ type ServiceClient interface {
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*Empty, error)
 	Evict(ctx context.Context, in *EvictRequest, opts ...grpc.CallOption) (*Empty, error)
+	EvictAll(ctx context.Context, in *EvictAllRequest, opts ...grpc.CallOption) (*Empty, error)
 	Call(ctx context.Context, in *CallRequest, opts ...grpc.CallOption) (*CallResponse, error)
 	HealthCheck(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 }
@@ -72,6 +74,15 @@ func (c *serviceClient) Evict(ctx context.Context, in *EvictRequest, opts ...grp
 	return out, nil
 }
 
+func (c *serviceClient) EvictAll(ctx context.Context, in *EvictAllRequest, opts ...grpc.CallOption) (*Empty, error) {
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, Service_EvictAll_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *serviceClient) Call(ctx context.Context, in *CallRequest, opts ...grpc.CallOption) (*CallResponse, error) {
 	out := new(CallResponse)
 	err := c.cc.Invoke(ctx, Service_Call_FullMethodName, in, out, opts...)
@@ -97,6 +108,7 @@ type ServiceServer interface {
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	Put(context.Context, *PutRequest) (*Empty, error)
 	Evict(context.Context, *EvictRequest) (*Empty, error)
+	EvictAll(context.Context, *EvictAllRequest) (*Empty, error)
 	Call(context.Context, *CallRequest) (*CallResponse, error)
 	HealthCheck(context.Context, *Empty) (*Empty, error)
 	mustEmbedUnimplementedServiceServer()
@@ -114,6 +126,9 @@ func (UnimplementedServiceServer) Put(context.Context, *PutRequest) (*Empty, err
 }
 func (UnimplementedServiceServer) Evict(context.Context, *EvictRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Evict not implemented")
+}
+func (UnimplementedServiceServer) EvictAll(context.Context, *EvictAllRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EvictAll not implemented")
 }
 func (UnimplementedServiceServer) Call(context.Context, *CallRequest) (*CallResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Call not implemented")
@@ -188,6 +203,24 @@ func _Service_Evict_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Service_EvictAll_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EvictAllRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ServiceServer).EvictAll(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Service_EvictAll_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ServiceServer).EvictAll(ctx, req.(*EvictAllRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Service_Call_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CallRequest)
 	if err := dec(in); err != nil {
@@ -242,6 +275,10 @@ var Service_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Evict",
 			Handler:    _Service_Evict_Handler,
+		},
+		{
+			MethodName: "EvictAll",
+			Handler:    _Service_EvictAll_Handler,
 		},
 		{
 			MethodName: "Call",
