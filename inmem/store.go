@@ -8,7 +8,7 @@ import (
 )
 
 // Getter Type used for auto cache filling
-type Getter[K comparable, V any] func(key K) (V, time.Duration, error)
+type Getter[K comparable, V any] func(ctx context.Context, key K) (V, time.Duration, error)
 
 type (
 	StoreOpt[K comparable, V any] func(*Store[K, V])
@@ -57,7 +57,7 @@ func NewStore[K comparable, V any](opts ...StoreOpt[K, V]) *Store[K, V] {
 	return s
 }
 
-func (s Store[K, V]) Get(key K) (Item[V], bool, error) {
+func (s Store[K, V]) Get(ctx context.Context, key K) (Item[V], bool, error) {
 	var unlocked bool
 	s.lock.RLockKey(key)
 	defer func() {
@@ -74,7 +74,7 @@ func (s Store[K, V]) Get(key K) (Item[V], bool, error) {
 		s.lock.LockKey(key)
 		defer s.lock.UnlockKey(key)
 
-		itm, err := s.unsafeCacheAside(key)
+		itm, err := s.unsafeCacheAside(ctx, key)
 		if err != nil {
 			return itm, false, err
 		}
@@ -98,6 +98,12 @@ func (s Store[K, V]) Evict(key K) {
 	s.internal.Evict(key)
 }
 
+func (s Store[K, V]) EvictAll(keys []K) {
+	for _, key := range keys {
+		s.Evict(key)
+	}
+}
+
 func (s Store[K, V]) Update(
 	ctx context.Context,
 	key K,
@@ -112,7 +118,7 @@ func (s Store[K, V]) Update(
 	if !ok && s.getter != nil {
 		skipInc = true
 		var err error
-		if oldItem, err = s.unsafeCacheAside(key); err != nil {
+		if oldItem, err = s.unsafeCacheAside(ctx, key); err != nil {
 			return Item[V]{}, err
 		}
 	}
@@ -141,8 +147,8 @@ func (s Store[K, V]) NewItem(value V, ttl time.Duration) Item[V] {
 }
 
 // Make sure to lock the key before using this
-func (s Store[K, V]) unsafeCacheAside(key K) (Item[V], error) {
-	v, ttl, err := s.getter(key)
+func (s Store[K, V]) unsafeCacheAside(ctx context.Context, key K) (Item[V], error) {
+	v, ttl, err := s.getter(ctx, key)
 	if err != nil {
 		return Item[V]{}, err
 	}

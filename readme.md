@@ -77,16 +77,14 @@ table := nitecache.NewTable[string]("sessions").
     WithStorage(nitecache.LRU(1024)).
     // Option to specify the cache-aside getter
     // If WithGetter is omitted, nitecache will return an error on cache miss. 
-    WithGetter(
-        func(key string) (Session, time.Duration, error) {
-            sess, err := getSessionFromSomewhere()
-            if err != nil {
-                return Session{}, 0, err
-            }
-            //Return the value and a ttl (optional)
-            return sess, time.Hour, nil
-        },
-    ).
+    WithGetter(func(ctx context.Context, key string) (Session, time.Duration, error) {
+        sess, err := getSessionFromSomewhere()
+        if err != nil {
+            return Session{}, 0, err
+        }
+        //Return the value and a ttl (optional)
+        return sess, time.Hour, nil
+    }).
     Build(c) // Pass cache instance to Build method
 ```
 

@@ -1,6 +1,7 @@
 package nitecache
 
 import (
+	"context"
 	"github.com/MysteriousPotato/nitecache/inmem"
 	"golang.org/x/sync/singleflight"
 	"time"
@@ -96,8 +97,8 @@ func (tb *TableBuilder[T]) Build(c *Cache) *Table[T] {
 
 	storageOpts := []inmem.StoreOpt[string, []byte]{inmem.WithStorage(tb.storage)}
 	if tb.getter != nil {
-		storageOpts = append(storageOpts, inmem.WithGetter(func(key string) ([]byte, time.Duration, error) {
-			v, ttl, err := tb.getter(key)
+		storageOpts = append(storageOpts, inmem.WithGetter(func(ctx context.Context, key string) ([]byte, time.Duration, error) {
+			v, ttl, err := tb.getter(ctx, key)
 			if err != nil {
 				return nil, 0, err
 			}

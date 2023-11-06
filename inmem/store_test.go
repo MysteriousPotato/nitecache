@@ -10,7 +10,7 @@ import (
 )
 
 func TestStore(t *testing.T) {
-	s := inmem.NewStore(inmem.WithGetter[string, string](func(_ string) (string, time.Duration, error) {
+	s := inmem.NewStore(inmem.WithGetter[string, string](func(_ context.Context, _ string) (string, time.Duration, error) {
 		return "empty", 0, nil
 	}))
 
@@ -34,7 +34,7 @@ func TestStore(t *testing.T) {
 
 	for _, op := range ops {
 		if op.op == "get" {
-			item, _, err := s.Get(op.key)
+			item, _, err := s.Get(context.Background(), op.key)
 			if err != nil {
 				t.Fatal(err)
 			}

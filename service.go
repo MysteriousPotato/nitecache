@@ -91,13 +91,13 @@ func timeoutInterceptor(timeout time.Duration) func(
 	}
 }
 
-func (s service) Get(_ context.Context, r *servicepb.GetRequest) (*servicepb.GetResponse, error) {
+func (s service) Get(ctx context.Context, r *servicepb.GetRequest) (*servicepb.GetResponse, error) {
 	t, err := s.cache.getTable(r.Table)
 	if err != nil {
 		return nil, err
 	}
 
-	item, hit, err := t.getLocally(r.Key)
+	item, hit, err := t.getLocally(ctx, r.Key)
 	if err != nil {
 		return nil, err
 	}

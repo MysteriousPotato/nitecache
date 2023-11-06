@@ -200,7 +200,7 @@ func (t *Table[T]) GetHot(key string) (T, error) {
 	var item inmem.Item[[]byte]
 	var hit bool
 	if ownerID == t.cache.self.ID {
-		item, hit, err = t.store.Get(key)
+		item, hit, err = t.store.Get(context.Background(), key)
 		if err != nil {
 			return t.getEmptyValue(), err
 		}

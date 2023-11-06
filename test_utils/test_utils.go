@@ -2,7 +2,6 @@ package test
 
 import (
 	"context"
-	"github.com/MysteriousPotato/nitecache"
 	"strconv"
 	"sync"
 	"testing"
@@ -13,6 +12,10 @@ var (
 	mu   = sync.Mutex{}
 	port = 50000
 )
+
+type Cache interface {
+	HealthCheckPeers(ctx context.Context) error
+}
 
 func GetUniqueAddr() string {
 	mu.Lock()
@@ -26,7 +29,7 @@ func SimpleHashFunc(key string) (int, error) {
 	return strconv.Atoi(key)
 }
 
-func WaitForServer(t *testing.T, c *nitecache.Cache) {
+func WaitForServer(t *testing.T, c Cache) {
 	timeout := time.Second * 5
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

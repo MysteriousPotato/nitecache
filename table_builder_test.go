@@ -1,12 +1,13 @@
 package nitecache
 
 import (
+	test "github.com/MysteriousPotato/nitecache/test_utils"
 	"reflect"
 	"testing"
 )
 
 func TestAutoCodecDetection(t *testing.T) {
-	c, err := NewCache(Member{ID: "1", Addr: ":8000"}, []Member{})
+	c, err := NewCache(Member{ID: "1", Addr: test.GetUniqueAddr()}, []Member{})
 	if err != nil {
 		t.Fatal(err)
 	}

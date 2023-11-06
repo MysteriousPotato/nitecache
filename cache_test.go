@@ -69,7 +69,7 @@ func TestSingleNodeCacheTable(t *testing.T) {
 	}
 
 	table := nitecache.NewTable[string]("tt").
-		WithGetter(func(key string) (string, time.Duration, error) {
+		WithGetter(func(_ context.Context, _ string) (string, time.Duration, error) {
 			return "empty", time.Hour, nil
 		}).
 		WithProcedure("procedure", func(_ context.Context, _ string, _ []byte) (string, time.Duration, error) {
@@ -183,7 +183,7 @@ func TestMultiNodeCacheTable(t *testing.T) {
 
 			caches[i] = c
 			tables[i] = nitecache.NewTable[string]("test").
-				WithGetter(func(key string) (string, time.Duration, error) {
+				WithGetter(func(_ context.Context, _ string) (string, time.Duration, error) {
 					return "empty", time.Hour, nil
 				}).
 				WithProcedure("procedure", func(_ context.Context, _ string, _ []byte) (string, time.Duration, error) {

@@ -51,9 +51,10 @@ type Member struct {
 }
 
 type table interface {
-	getLocally(key string) (inmem.Item[[]byte], bool, error)
+	getLocally(ctx context.Context, key string) (inmem.Item[[]byte], bool, error)
 	putLocally(key string, item inmem.Item[[]byte]) error
 	evictLocally(key string) error
+	evictAllLocally(keys []string)
 	callLocally(ctx context.Context, key, procedure string, args []byte) (inmem.Item[[]byte], error)
 	tearDown()
 }
