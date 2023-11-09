@@ -42,7 +42,7 @@ nitecache is an embedded and distributed cache library for golang that supports:
 - requires go version >= 1.21
 
 ```sh
-go get github.com/MysteriousPotato/nitecache@v0.4.2
+go get github.com/MysteriousPotato/nitecache@v0.4.3
 ```
 
 ### Usage
