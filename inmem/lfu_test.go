@@ -9,41 +9,64 @@ import (
 )
 
 func TestLfu(t *testing.T) {
-	ops := []struct {
-		key   int
-		value int
+	putOps := []struct {
+		key    int
+		value  int
+		exists bool
 	}{
-		{key: 1, value: 0},
-		{key: 1, value: 1},
-		{key: 1, value: 2},
-		{key: 2, value: 3},
-		{key: 2, value: 4},
-		{key: 4, value: 5},
-		{key: 3, value: 6},
-		{key: 2, value: 7},
-		{key: 3, value: 8},
+		{key: 1, value: 0, exists: false},
+		{key: 1, value: 1, exists: true},
+		{key: 1, value: 2, exists: true},
+		{key: 2, value: 3, exists: false},
+		{key: 2, value: 4, exists: true},
+		{key: 4, value: 5, exists: false},
+		{key: 3, value: 6, exists: false},
+		{key: 2, value: 7, exists: true},
+		{key: 3, value: 8, exists: true},
 	}
+	expectedPut := map[int]int{1: 2, 2: 7, 3: 8}
 
-	expected := map[int]int{1: 2, 2: 7, 3: 8}
+	evictOps := []struct {
+		key    int
+		exists bool
+	}{
+		{key: 1, exists: true},
+		{key: 2, exists: true},
+		{key: 4, exists: false},
+	}
+	expectedEvict := map[int]int{3: 8}
 
 	lfu := inmem.NewLFU[int, int](3)
-	for _, op := range ops {
-		lfu.Put(op.key, op.value)
+	for _, op := range putOps {
+		if exists := lfu.Put(op.key, op.value); exists != op.exists {
+			t.Fatalf("Expected exists %t, got %t for put operation", op.exists, exists)
+		}
 	}
 
-	for k, expectedV := range expected {
+	for k, expectedV := range expectedPut {
 		v, ok := lfu.Get(k)
 		if !ok {
 			t.Fatalf("Value not found for key: %q", k)
 		}
 		if v != expectedV {
-			t.Fatalf("Expected %v for key %q\ngot %v", expected, k, v)
+			t.Fatalf("Expected %v for key %q\ngot %v", expectedPut, k, v)
 		}
 	}
 
 	got := lfu.Values()
-	if !reflect.DeepEqual(got, expected) {
-		t.Fatalf("Expected %v\ngot %v", expected, got)
+	if !reflect.DeepEqual(got, expectedPut) {
+		t.Fatalf("Expected %v afcter puts \ngot %v", expectedPut, got)
+	}
+
+	for _, op := range evictOps {
+		if exists := lfu.Evict(op.key); exists != op.exists {
+			t.Fatalf("Expected exists %t, got %t for evict operation", op.exists, exists)
+		}
+	}
+
+	gotEvict := lfu.Values()
+	if !reflect.DeepEqual(gotEvict, expectedEvict) {
+		t.Fatalf("Expected %v after evictions\ngot %v", expectedEvict, gotEvict)
 	}
 }
 

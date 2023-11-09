@@ -97,6 +97,7 @@ func (l *LRU[T, K]) Evict(key T) bool {
 	if ele, ok := l.hashMap[key]; ok {
 		l.size -= 1
 		l.evictionQueue.Remove(ele)
+		delete(l.hashMap, key)
 		return true
 	}
 	return false
