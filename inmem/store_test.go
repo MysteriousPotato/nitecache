@@ -68,3 +68,40 @@ func TestStore(t *testing.T) {
 		t.Fatalf("expected: %v\ngot:%v", expected, got)
 	}
 }
+
+func TestStoreTTL(t *testing.T) {
+	s := inmem.NewStore[string, string]()
+
+	ops := []struct {
+		op      string
+		expired bool
+		ttl     time.Duration
+		wait    time.Duration
+	}{
+		{op: "put", ttl: time.Second},
+		{op: "get"},
+		{op: "put", ttl: time.Millisecond, wait: time.Millisecond},
+		{op: "get", expired: true},
+	}
+
+	for _, op := range ops {
+		if op.op == "get" {
+			item, _, err := s.Get(context.Background(), "1")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			isExpired := item.IsExpired()
+			if isExpired != op.expired {
+				t.Errorf("expected expired %v, got %v", op.expired, isExpired)
+			}
+		}
+		if op.op == "put" {
+			s.Put("1", s.NewItem("test", op.ttl))
+			time.Sleep(op.wait)
+		}
+		if op.op == "evict" {
+			s.Evict("1")
+		}
+	}
+}

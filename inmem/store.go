@@ -67,7 +67,7 @@ func (s Store[K, V]) Get(ctx context.Context, key K) (Item[V], bool, error) {
 	}()
 
 	itm, hit := s.internal.Get(key)
-	if s.getter != nil && (!hit || itm.isExpired()) {
+	if s.getter != nil && (!hit || itm.IsExpired()) {
 		s.lock.RUnlockKey(key)
 		unlocked = true
 
@@ -164,6 +164,6 @@ func (s Store[K, V]) getEmptyValue() V {
 	return v
 }
 
-func (i Item[V]) isExpired() bool {
+func (i Item[V]) IsExpired() bool {
 	return !i.Expire.IsZero() && i.Expire.Before(time.Now())
 }
