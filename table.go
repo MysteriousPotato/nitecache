@@ -76,7 +76,7 @@ func (t *Table[T]) Get(ctx context.Context, key string) (T, error) {
 		return t.getEmptyValue(), err
 	}
 
-	if !hit && !t.autofill {
+	if !hit && !t.autofill || item.IsExpired() {
 		return t.getEmptyValue(), ErrKeyNotFound
 	}
 
@@ -252,6 +252,10 @@ func (t *Table[T]) Call(ctx context.Context, key, function string, args []byte) 
 		return t.getEmptyValue(), nil
 	}
 
+	if item.IsExpired() {
+		return t.getEmptyValue(), ErrKeyNotFound
+	}
+
 	var v T
 	if err := t.codec.Decode(item.Value, &v); err != nil {
 		return t.getEmptyValue(), err
@@ -288,7 +292,7 @@ func (t *Table[T]) GetHot(key string) (T, error) {
 		return t.getEmptyValue(), err
 	}
 
-	if !hit {
+	if !hit || item.IsExpired() {
 		return t.getEmptyValue(), ErrKeyNotFound
 	}
 
